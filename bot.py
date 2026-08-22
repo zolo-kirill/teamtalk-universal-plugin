@@ -179,6 +179,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._last_err_sent = 0
         self.paused = False
         self.volume = min(DEFAULT_VOLUME, MAX_VOLUME)
+        self.cur_vol = self.volume / 100.0  # actual gain, ramps toward self.volume
         self.service = DEFAULT_SERVICE  # "yt" = YouTube, "ym" = Yandex.Music
         self.cur_offset_ms = 0
         self.segment_started_at = 0
@@ -193,6 +194,11 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.search_results = []
         self.search_index = 0
         self.auto_list = False  # True when playing through the search-result list
+        self.silent = False  # True when switching tracks on auto-advance (no status spam)
+        # playlist navigation (YouTube / Yandex Music playlist links)
+        self.playlist = []  # list of (url, title)
+        self.playlist_index = -1
+        self.auto_playlist = False  # True when playing through a playlist
         # radio stations from radio/ folder (m3u playlists grouped by category)
         self.radio = self._load_radio()
         if self.radio:
@@ -227,14 +233,24 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("channel_msg save err: %s" % e)
 
     def _scale_pcm(self, chunk):
-        """Apply the current volume to a raw s16 mono PCM block (no ffmpeg restart)."""
-        v = self.volume / 100.0
-        if v >= 0.999:
+        """Apply volume with a smooth ramp toward the target (no ffmpeg restart).
+
+        Each call is one 20 ms block; self.cur_vol steps ~2% toward self.volume,
+        so a full-scale change eases in over ~1 second instead of snapping.
+        """
+        target = self.volume / 100.0
+        cur = self.cur_vol
+        if cur < target:
+            cur = min(target, cur + 0.02)
+        elif cur > target:
+            cur = max(target, cur - 0.02)
+        self.cur_vol = cur
+        if cur >= 0.999:
             return chunk
         a = array.array("h")
         a.frombytes(chunk)
         for i in range(len(a)):
-            a[i] = int(a[i] * v)
+            a[i] = int(a[i] * cur)
         return a.tobytes()
 
     # ----- helpers ---------------------------------------------------
@@ -471,6 +487,9 @@ class MusicBot(TeamTalk5.TeamTalk):
         low = url.lower()
         if "youtube.com" not in low and "youtu.be" not in low:
             return False
+        # watch/shorts/embed links (even with &list= autoplay param) are single videos
+        if "watch?" in low or "/shorts/" in low or "/embed/" in low:
+            return False
         return bool(re.search(r"(^|[/?&])list=", url)) or "/playlist" in low
 
     def _yt_playlist_items(self, url, limit=PLAYLIST_LIMIT):
@@ -566,7 +585,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         real_url = url
         if url.startswith("ytsearch1:"):
             q = url.split(":", 1)[1]
-            self.api_q.put(("status", "🔎 Ищу на YouTube: %s…" % q))
+            if not self.silent:
+                self.api_q.put(("status", "🔎 Ищу на YouTube: %s…" % q))
             items = self._yt_search_list(q)
             if not items:
                 self.api_q.put(("download_fail", url, title, "Поиск не нашёл видео"))
@@ -575,7 +595,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         ym_title = None
         if url.startswith("ymtrack:"):
             tid = url.split(":", 1)[1]
-            self.api_q.put(("status", "🎵 Ищу трек на Яндекс.Музыке…"))
+            if not self.silent:
+                self.api_q.put(("status", "🎵 Ищу трек на Яндекс.Музыке…"))
             real_url, ym_title = self._ym_resolve(tid)
             if not real_url:
                 self.api_q.put(("download_fail", url, title, ym_title or "не нашёл"))
@@ -583,7 +604,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             title = ym_title or title
         elif url.startswith("ymsearch1:"):
             q = url.split(":", 1)[1]
-            self.api_q.put(("status", "🔎 Ищу на Яндекс.Музыке: %s…" % q))
+            if not self.silent:
+                self.api_q.put(("status", "🔎 Ищу на Яндекс.Музыке: %s…" % q))
             items = self._ym_search_list(q)
             if not items:
                 self.api_q.put(("download_fail", url, title, "Ничего не нашёл на Яндекс.Музыке."))
@@ -789,13 +811,15 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.playing = True
         self.paused = False
         self.cur_offset_ms = 0
-        self._send("▶ Сейчас играет: %s" % title)
+        if not self.silent:
+            self._send("▶ Сейчас играет: %s" % title)
         self._set_status("Playing: %s" % title)
         self._start_voice(path, 0)
 
     def _play_local(self, path, title):
         """Play a local file (no download) — used for files sent via Telegram."""
         self.auto_list = False
+        self.auto_playlist = False
         self.queue.clear()
         self.downloading.clear()
         self._stop_voice()
@@ -848,6 +872,7 @@ class MusicBot(TeamTalk5.TeamTalk):
     def _switch_to(self, key, label):
         """Stop whatever plays and immediately play `key` (used by n/b and direct links)."""
         self.auto_list = False
+        self.auto_playlist = False
         self.queue.clear()
         self._stop_voice()
         self.playing = False
@@ -858,7 +883,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._set_status("")
         self._enqueue_url(key, label)
 
-    def _play_search_index(self, idx):
+    def _play_search_index(self, idx, silent=False):
+        self.silent = silent
         if not self.search_results:
             self._send("Список результатов пуст. Сначала поищи: п <запрос>")
             return
@@ -869,6 +895,20 @@ class MusicBot(TeamTalk5.TeamTalk):
         item = self.search_results[idx]
         self._switch_to(item["key"], "🎵 %d. %s" % (idx + 1, item["title"]))
         self.auto_list = True
+
+    def _play_playlist_index(self, idx, silent=False):
+        """Play track `idx` of the current playlist (YouTube / Yandex Music)."""
+        self.silent = silent
+        if not self.playlist:
+            self._send("Список плейлиста пуст. Вставь ссылку на плейлист.")
+            return
+        if idx < 0 or idx >= len(self.playlist):
+            self._send("Нет трека под номером %d (всего %d)." % (idx + 1, len(self.playlist)))
+            return
+        self.playlist_index = idx
+        u, t = self.playlist[idx]
+        self._switch_to(u, "🎵 %d. %s" % (idx + 1, t))
+        self.auto_playlist = True
 
     def _do_search(self, query):
         self._send("🔎 Ищу: %s…" % query)
@@ -885,7 +925,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("search err: %s" % e)
             self.api_q.put(("search_done", query, []))
 
-    def _advance(self):
+    def _advance(self, silent=False):
+        self.silent = silent
         self._stop_voice()
         self.playing = False
         self.paused = False
@@ -895,6 +936,10 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.voice_offset_base = 0
         self.voice_started_at = 0
         self._set_status("")
+        if self.auto_playlist and self.playlist and self.playlist_index + 1 < len(self.playlist):
+            # auto-advance through the playlist
+            self._play_playlist_index(self.playlist_index + 1, silent=True)
+            return
         if self.queue:
             self.queue.pop(0)
         if self.queue:
@@ -902,10 +947,11 @@ class MusicBot(TeamTalk5.TeamTalk):
         elif self.auto_list and self.search_results and self.search_index + 1 < len(self.search_results):
             # auto-advance: keep playing the rest of the search-result list
             self.search_index += 1
-            self._play_search_index(self.search_index)
+            self._play_search_index(self.search_index, silent=True)
         else:
-            ended = self.auto_list
+            ended = self.auto_list or self.auto_playlist
             self.auto_list = False
+            self.auto_playlist = False
             self._send("⏹ Конец списка." if ended else "⏹ Очередь пуста.")
 
     # ----- radio stations (m3u playlists) -----
@@ -982,6 +1028,7 @@ class MusicBot(TeamTalk5.TeamTalk):
     def _play_radio(self, url, title):
         """Play an internet radio stream directly (no download)."""
         self.auto_list = False
+        self.auto_playlist = False
         self.queue.clear()
         self.downloading.clear()
         self._stop_voice()
@@ -1000,6 +1047,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         cmd = low[1:] if low.startswith("/") else low
         if from_user:
             self.reply_user_id = from_user
+        self.silent = False  # explicit command → report status again
 
         # --- громкость: v 100 / v 50 / громкость 30 / volume 80 ---
         m = re.match(r"^(?:v|громкость|громко|volume)\s+(\d{1,3})$", cmd)
@@ -1064,6 +1112,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             self.queue.clear()
             self.downloading.clear()
             self.auto_list = False
+            self.auto_playlist = False
+            self.silent = False
             self._stop_voice()
             self.playing = False
             self.paused = False
@@ -1099,13 +1149,27 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._play_local(path, os.path.basename(path))
             return
 
-        # --- n/b: следующий/предыдущий по списку результатов поиска ---
+        # --- n/b: следующий/предыдущий (по активному плейлисту или списку поиска) ---
         if cmd in ("n", "н", "next"):
-            self._play_search_index(self.search_index + 1)
+            if self.auto_playlist:
+                self._play_playlist_index(self.playlist_index + 1)
+            elif self.auto_list:
+                self._play_search_index(self.search_index + 1)
+            elif self.playlist:
+                self._play_playlist_index(self.playlist_index + 1)
+            else:
+                self._play_search_index(self.search_index + 1)
             return
 
         if cmd in ("b", "back", "назад"):
-            self._play_search_index(self.search_index - 1)
+            if self.auto_playlist:
+                self._play_playlist_index(self.playlist_index - 1)
+            elif self.auto_list:
+                self._play_search_index(self.search_index - 1)
+            elif self.playlist:
+                self._play_playlist_index(self.playlist_index - 1)
+            else:
+                self._play_search_index(self.search_index - 1)
             return
 
         # --- радио: радио / радио <N> / радио <текст> ---
@@ -1176,10 +1240,12 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _enqueue_url(self, url, label):
         if url in [u for u, _ in self.queue]:
-            self._send("Уже в очереди: %s" % label)
+            if not self.silent:
+                self._send("Уже в очереди: %s" % label)
             return
         self.queue.append((url, label))
-        self._send("➕ %s" % label)
+        if not self.silent:
+            self._send("➕ %s" % label)
         self._enqueue_next()
 
     def _queue_cmd(self):
@@ -1348,7 +1414,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                         self.queue[0] = (url, title)
                         if not self.playing:
                             self._play_file(url, title, path)
-                        else:
+                        elif not self.silent:
                             self._send("⬇ Скачано (в очереди): %s" % title)
                     # else: stale download (superseded by n/b switch) — drop
                 elif kind == "download_fail":
@@ -1358,8 +1424,12 @@ class MusicBot(TeamTalk5.TeamTalk):
                     # remove from queue if first
                     if self.queue and self.queue[0][0] == url:
                         self.queue.pop(0)
-                        self._send("⚠ Не удалось скачать %s: %s" % (url, err))
-                        self._enqueue_next()
+                        if self.auto_playlist and self.playlist:
+                            self._send("⚠ Не удалось: %s" % err)
+                            self._advance(silent=True)
+                        else:
+                            self._send("⚠ Не удалось скачать %s: %s" % (url, err))
+                            self._enqueue_next()
                     else:
                         self._send("⚠ Ошибка скачивания: %s" % err)
                 elif kind == "search_done":
@@ -1380,7 +1450,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                         self._send("⚠ Не удалось получить плейлист: %s" % url)
                         return
                     self.auto_list = False
-                    self.queue = items[:]
+                    self.queue = []
                     self.downloading.clear()
                     self._stop_voice()
                     self.playing = False
@@ -1391,18 +1461,19 @@ class MusicBot(TeamTalk5.TeamTalk):
                     self.voice_offset_base = 0
                     self.voice_started_at = 0
                     self._set_status("")
+                    self.playlist = items
                     lines = ["📃 Плейлист (%d):" % len(items)]
                     for i, (u, t) in enumerate(items[:5], 1):
                         lines.append("%d. %s" % (i, t[:50]))
                     if len(items) > 5:
                         lines.append("… и ещё %d треков" % (len(items) - 5))
-                    lines.append("скип — дальше, с — стоп")
+                    lines.append("n — следующий, b — предыдущий, с — стоп")
                     self._send("\n".join(lines))
-                    self._enqueue_next()
+                    self._play_playlist_index(0)
                 elif kind == "advance":
-                    self._advance()
+                    self._advance(silent=True)
                 elif kind == "voice_finished":
-                    self._advance()
+                    self._advance(silent=True)
                 elif kind == "voice_error":
                     _, msg = item
                     self._send("⚠ Голос: %s" % msg)
