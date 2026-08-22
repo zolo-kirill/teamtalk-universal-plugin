@@ -1,0 +1,25 @@
+var struct_bear_ware_1_1_channel =
+[
+    [ "AddTransmitUser", "struct_bear_ware_1_1_channel.html#a2ddcca08ed2920426aa7ccfcc8476957", null ],
+    [ "GetTransmitStreamTypes", "struct_bear_ware_1_1_channel.html#a93c52df1bc7f016718a485eb5ca5a37b", null ],
+    [ "GetTransmitUserCount", "struct_bear_ware_1_1_channel.html#a3b606eb3af956cfbb181fbfc0efc79ef", null ],
+    [ "RemoveTransmitUser", "struct_bear_ware_1_1_channel.html#a5857f17bf8d26fa0d86d2a211616bb6a", null ],
+    [ "nParentID", "struct_bear_ware_1_1_channel.html#ac233f964a6c957e5c1c6f1a7231cf0a3", null ],
+    [ "nChannelID", "struct_bear_ware_1_1_channel.html#ac266a873802f83fb2182d503ebc85751", null ],
+    [ "szName", "struct_bear_ware_1_1_channel.html#ad24700b340622cceceb85d0301d48636", null ],
+    [ "szTopic", "struct_bear_ware_1_1_channel.html#a9bdd0b789a8723af0af97c9af28b5a23", null ],
+    [ "szPassword", "struct_bear_ware_1_1_channel.html#a6ecdada803ee795cd8937a4a2fbe4a01", null ],
+    [ "bPassword", "struct_bear_ware_1_1_channel.html#a6c479e6f8016459c9e07f1c6c5bab6c5", null ],
+    [ "uChannelType", "struct_bear_ware_1_1_channel.html#ac73ac538900fef20a2e796418d94ecfb", null ],
+    [ "nUserData", "struct_bear_ware_1_1_channel.html#a9dc170ca5abf606e4bf946420adfdd70", null ],
+    [ "nDiskQuota", "struct_bear_ware_1_1_channel.html#a899a32066413241f199923224b3249cb", null ],
+    [ "szOpPassword", "struct_bear_ware_1_1_channel.html#abf78ab610711885f8588863a0e008927", null ],
+    [ "nMaxUsers", "struct_bear_ware_1_1_channel.html#accbfbe37b803c193c95fac0aff3cb45c", null ],
+    [ "audiocodec", "struct_bear_ware_1_1_channel.html#a9c7c90ae47a48aa08aa65b928aba38ee", null ],
+    [ "audiocfg", "struct_bear_ware_1_1_channel.html#a4c62e1522d97d257ce09433278fb06f5", null ],
+    [ "transmitUsers", "struct_bear_ware_1_1_channel.html#a8dd73398d28f78df75b70171062cf4fc", null ],
+    [ "transmitUsersQueue", "struct_bear_ware_1_1_channel.html#a0c5fffa05019e7f463f8a8f283d80831", null ],
+    [ "nTransmitUsersQueueDelayMSec", "struct_bear_ware_1_1_channel.html#a0c452ff198e0d0e40cf442a4e0630ac7", null ],
+    [ "nTimeOutTimerVoiceMSec", "struct_bear_ware_1_1_channel.html#ab48e9f5a3e406ecbaedce285e5434a0b", null ],
+    [ "nTimeOutTimerMediaFileMSec", "struct_bear_ware_1_1_channel.html#a5ea2a31efd56a8d1f278c8a5d6719596", null ]
+];

@@ -1,0 +1,27 @@
+var searchData=
+[
+  ['bactive_1417',['bActive',['../struct_t_t_message.html#a8003a57bf3c8f798a288474699b78dc7',1,'TTMessage']]],
+  ['banneduser_1418',['banneduser',['../struct_t_t_message.html#ab257d39a2885984cfe02d5adf8b1e639',1,'TTMessage']]],
+  ['bautosave_1419',['bAutoSave',['../struct_server_properties.html#aa2e3af09346d2288decd3f3d8408d585',1,'ServerProperties']]],
+  ['bdtx_1420',['bDTX',['../struct_speex_v_b_r_codec.html#a2c086435f812a529bc406409cd661c4e',1,'SpeexVBRCodec::bDTX()'],['../struct_opus_codec.html#a3d6bb6fe1ea11abd41c6930429cc8883',1,'OpusCodec::bDTX()']]],
+  ['benable_1421',['bEnable',['../struct_web_r_t_c_audio_preprocessor.html#a75780c6500662bf09cceb410f3769021',1,'WebRTCAudioPreprocessor']]],
+  ['benableagc_1422',['bEnableAGC',['../struct_sound_device_effects.html#ada1834fc5358e60f6c1489fb6e792da9',1,'SoundDeviceEffects::bEnableAGC()'],['../struct_speex_d_s_p.html#adbeeb523f77691fe9950f0eeb43d7a29',1,'SpeexDSP::bEnableAGC()'],['../struct_audio_config.html#afc940f637b6cfaadd7769e9b64a5870f',1,'AudioConfig::bEnableAGC()']]],
+  ['benabledenoise_1423',['bEnableDenoise',['../struct_sound_device_effects.html#af0441d83d948454aae3e5def3d93abb2',1,'SoundDeviceEffects::bEnableDenoise()'],['../struct_speex_d_s_p.html#a76fa214f7bfe85315d2fc3a2d1ba7896',1,'SpeexDSP::bEnableDenoise()']]],
+  ['benableechocancellation_1424',['bEnableEchoCancellation',['../struct_sound_device_effects.html#a038a4aab408dca92c4131217269a074a',1,'SoundDeviceEffects::bEnableEchoCancellation()'],['../struct_speex_d_s_p.html#a60e850594547d3fcd764e00cb311d118',1,'SpeexDSP::bEnableEchoCancellation()']]],
+  ['bfec_1425',['bFEC',['../struct_opus_codec.html#a3b0916979cf2b08cebf4e7560a571c63',1,'OpusCodec']]],
+  ['binbound_1426',['bInbound',['../struct_file_transfer.html#a23439b6d8db9e971ba7f60250e575940',1,'FileTransfer']]],
+  ['bkeyframe_1427',['bKeyFrame',['../struct_video_frame.html#aaeaf12dc9d22eaeeaee7ea3906e5d503',1,'VideoFrame']]],
+  ['bmore_1428',['bMore',['../struct_text_message.html#a12a6248f6dd01a8002059c52344e7b46',1,'TextMessage']]],
+  ['bmpformat_1429',['bmpFormat',['../struct_desktop_window.html#ad8b0b2c8413a4cb4d9a40591b7ac6e7c',1,'DesktopWindow']]],
+  ['bmuteleftspeaker_1430',['bMuteLeftSpeaker',['../struct_t_t_audio_preprocessor.html#ac90b4236b9823073ae28dc3a333907b1',1,'TTAudioPreprocessor']]],
+  ['bmuterightspeaker_1431',['bMuteRightSpeaker',['../struct_t_t_audio_preprocessor.html#adc8fc8222e0ee7968a6555f9b86a286b',1,'TTAudioPreprocessor']]],
+  ['bpassword_1432',['bPassword',['../struct_channel.html#a63668144f7c9044b24c84537b6812b55',1,'Channel']]],
+  ['bpaused_1433',['bPaused',['../struct_media_file_playback.html#a34a58c01c1dfe8c89033652d5a219084',1,'MediaFilePlayback']]],
+  ['bstereoplayback_1434',['bStereoPlayback',['../struct_speex_codec.html#ad3e59eaa4158566b9e39eb09b7160493',1,'SpeexCodec::bStereoPlayback()'],['../struct_speex_v_b_r_codec.html#a3d1591529b3a3ba630d83ca2d9616303',1,'SpeexVBRCodec::bStereoPlayback()']]],
+  ['bsupports3d_1435',['bSupports3D',['../struct_sound_device.html#aaad26af73f8eaecf7b11c8efd1321aa0',1,'SoundDevice']]],
+  ['buseadativedejitter_1436',['bUseAdativeDejitter',['../struct_jitter_config.html#a3edc8aee16f05ac8e0b10be9f7dcb924',1,'JitterConfig']]],
+  ['bvbr_1437',['bVBR',['../struct_opus_codec.html#a9d91adb32411c64f67d8400e15af280d',1,'OpusCodec']]],
+  ['bvbrconstraint_1438',['bVBRConstraint',['../struct_opus_codec.html#a0c718c206540e91b6a13ff8c03dbd044',1,'OpusCodec']]],
+  ['bverifyclientonce_1439',['bVerifyClientOnce',['../struct_encryption_context.html#a0430acb194dc414f84ad26a9ea237e7a',1,'EncryptionContext']]],
+  ['bverifypeer_1440',['bVerifyPeer',['../struct_encryption_context.html#a99c9ea8f773071556ac156ed87296af6',1,'EncryptionContext']]]
+];

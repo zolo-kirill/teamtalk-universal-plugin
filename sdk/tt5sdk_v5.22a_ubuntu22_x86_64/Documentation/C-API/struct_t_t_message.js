@@ -1,0 +1,27 @@
+var struct_t_t_message =
+[
+    [ "nClientEvent", "struct_t_t_message.html#ab3b6afe5d5a792f755751f8a0f074d3c", null ],
+    [ "nSource", "struct_t_t_message.html#ad3a853493b3aa2159ded42aaf6358498", null ],
+    [ "ttType", "struct_t_t_message.html#afe01294f7577f7dae9c559145c73aa86", null ],
+    [ "uReserved", "struct_t_t_message.html#a45b8ff66e7fa915bce4f969a404acfa2", null ],
+    [ "channel", "struct_t_t_message.html#ad433b374c861bbafdf53f1e34e012b92", null ],
+    [ "clienterrormsg", "struct_t_t_message.html#a4a4fd41a5fbbfa0b15515746893b0a33", null ],
+    [ "desktopinput", "struct_t_t_message.html#a62d59d9b5c53f57f2d7f3a576e313ec2", null ],
+    [ "filetransfer", "struct_t_t_message.html#ac0706ac2eb1e6c5da90ce90da9dfe6d9", null ],
+    [ "mediafileinfo", "struct_t_t_message.html#a3f33de80c40827e1ce42ba172799c5d5", null ],
+    [ "remotefile", "struct_t_t_message.html#a7fd245c8d1a44cbb002e724b276c2081", null ],
+    [ "serverproperties", "struct_t_t_message.html#ad228360541a42bc49522c92faf7a1107", null ],
+    [ "serverstatistics", "struct_t_t_message.html#abe4bcd67d2bb9d60a6150e3327ef0d17", null ],
+    [ "textmessage", "struct_t_t_message.html#a69dc7cab56e590df08f8cbbbeed5123a", null ],
+    [ "user", "struct_t_t_message.html#a949c52a5be8c915410b6783f0a5f63cb", null ],
+    [ "useraccount", "struct_t_t_message.html#a6ae6a2b879aba58c25e94936a2c66993", null ],
+    [ "banneduser", "struct_t_t_message.html#ab257d39a2885984cfe02d5adf8b1e639", null ],
+    [ "bActive", "struct_t_t_message.html#a8003a57bf3c8f798a288474699b78dc7", null ],
+    [ "nBytesRemain", "struct_t_t_message.html#a3a29ec928928b420dd615d0efa1eea01", null ],
+    [ "nStreamID", "struct_t_t_message.html#a1a6fdd67ded50111af45c8d59925d9c2", null ],
+    [ "nPayloadSize", "struct_t_t_message.html#a55ec9d16728136580ccea2b50589d84c", null ],
+    [ "nStreamType", "struct_t_t_message.html#a397d167627562fb3e001d1102d35ac3f", null ],
+    [ "audioinputprogress", "struct_t_t_message.html#ab0a8758dd254f725768db9ff9ee82bae", null ],
+    [ "sounddevice", "struct_t_t_message.html#aa56b4187b2fa246d7cdf5e7e0b0c3c23", null ],
+    [ "data", "struct_t_t_message.html#a85b7e0a288be1a72354e6b3883c24c38", null ]
+];
