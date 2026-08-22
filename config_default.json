@@ -6,7 +6,8 @@
         "default_service": "yt",
         "start_commands": [],
         "delete_uploaded_files_after": 300,
-        "time_format": "%H:%M"
+        "time_format": "%H:%M",
+        "pulse_sink": ""
     },
     "player": {
         "default_volume": 10,
