@@ -1,0 +1,26 @@
+var searchData=
+[
+  ['ubantypes_1879',['uBanTypes',['../struct_bear_ware_1_1_banned_user.html#abec488617d1d01ccbbce95e02448ee2c',1,'BearWare::BannedUser']]],
+  ['uchanneltype_1880',['uChannelType',['../struct_bear_ware_1_1_channel.html#ac73ac538900fef20a2e796418d94ecfb',1,'BearWare::Channel']]],
+  ['udurationmsec_1881',['uDurationMSec',['../struct_bear_ware_1_1_media_file_info.html#aae1dd70054095b511960a8ddc554e5cf',1,'BearWare::MediaFileInfo']]],
+  ['uelapsedmsec_1882',['uElapsedMSec',['../struct_bear_ware_1_1_media_file_info.html#a5ba5df73d07925e2e8934167b64b9dc3',1,'BearWare.MediaFileInfo.uElapsedMSec()'],['../struct_bear_ware_1_1_audio_input_progress.html#a077c59624c307380a21243d3c40f2d3f',1,'BearWare.AudioInputProgress.uElapsedMSec()']]],
+  ['ukeycode_1883',['uKeyCode',['../struct_bear_ware_1_1_desktop_input.html#a7d2ee45ff856208123de998d946c0e4d',1,'BearWare::DesktopInput']]],
+  ['ukeystate_1884',['uKeyState',['../struct_bear_ware_1_1_desktop_input.html#aea0a02e071aa961beaca458da97f4151',1,'BearWare::DesktopInput']]],
+  ['ulocalsubscriptions_1885',['uLocalSubscriptions',['../struct_bear_ware_1_1_user.html#ad78a7da688122ce3b42c4dadf4a1356b',1,'BearWare::User']]],
+  ['umouseposx_1886',['uMousePosX',['../struct_bear_ware_1_1_desktop_input.html#a78ddcafa0e50de054dfa36b3e56e5f2f',1,'BearWare::DesktopInput']]],
+  ['umouseposy_1887',['uMousePosY',['../struct_bear_ware_1_1_desktop_input.html#a905a4b20e35e3db50544a91e53e76dd0',1,'BearWare::DesktopInput']]],
+  ['uoffsetmsec_1888',['uOffsetMSec',['../struct_bear_ware_1_1_media_file_playback.html#a125902265e60090cd8b389ed591a13aa',1,'BearWare::MediaFilePlayback']]],
+  ['upeersubscriptions_1889',['uPeerSubscriptions',['../struct_bear_ware_1_1_user.html#a2ffff4ca1655acc477da5c0281d90b8f',1,'BearWare::User']]],
+  ['uqueuemsec_1890',['uQueueMSec',['../struct_bear_ware_1_1_audio_input_progress.html#ac1bb2910ef2656013e90b02c6fa5bbae',1,'BearWare::AudioInputProgress']]],
+  ['ureserved_1891',['uReserved',['../struct_bear_ware_1_1_t_t_message.html#a1a2205014080d96e7ef1cdd6847d3d97',1,'BearWare::TTMessage']]],
+  ['usampleindex_1892',['uSampleIndex',['../struct_bear_ware_1_1_audio_block.html#a3eef1ed2da400761d0a2fe904c14541d',1,'BearWare::AudioBlock']]],
+  ['user_1893',['user',['../struct_bear_ware_1_1_union_data.html#a5399667391552a6f89bcafd0aebaff90',1,'BearWare::UnionData']]],
+  ['useraccount_1894',['useraccount',['../struct_bear_ware_1_1_union_data.html#ae0105fd5abc02a5fb142a7ea0c154df1',1,'BearWare::UnionData']]],
+  ['userverlogevents_1895',['uServerLogEvents',['../struct_bear_ware_1_1_server_properties.html#a321df263b0912f7cf7f59edf49984432',1,'BearWare::ServerProperties']]],
+  ['usounddevicefeatures_1896',['uSoundDeviceFeatures',['../struct_bear_ware_1_1_sound_device.html#a5e267f841000082fbd3fcaa88b89843c',1,'BearWare::SoundDevice']]],
+  ['ustreamtypes_1897',['uStreamTypes',['../struct_bear_ware_1_1_audio_block.html#a2358d12c5e6dfd8690446b35ca93d653',1,'BearWare::AudioBlock']]],
+  ['uuserrights_1898',['uUserRights',['../struct_bear_ware_1_1_user_account.html#a38735808061bcf1a39c168c198bb82e6',1,'BearWare::UserAccount']]],
+  ['uuserstate_1899',['uUserState',['../struct_bear_ware_1_1_user.html#a6bfcbf73ab4b30b2ae95385c546d57a9',1,'BearWare::User']]],
+  ['uusertype_1900',['uUserType',['../struct_bear_ware_1_1_user_account.html#a1e030d14bb650d252791e7225e1a6aaf',1,'BearWare.UserAccount.uUserType()'],['../struct_bear_ware_1_1_user.html#a7e9dd47ea771a5223ee1d2ddfff2fc3d',1,'BearWare.User.uUserType()']]],
+  ['uversion_1901',['uVersion',['../struct_bear_ware_1_1_user.html#a3c1526b62577ff884b4ef40d9643676a',1,'BearWare::User']]]
+];

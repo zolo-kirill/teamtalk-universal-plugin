@@ -1,0 +1,23 @@
+var searchData=
+[
+  ['saveserverconfigcallback_1738',['SaveServerConfigCallback',['../group__serverlogevents.html#gac9eb4b8c775357a7f888125a3de89fd2',1,'TeamTalkSrv.h']]],
+  ['serverlogevent_1739',['ServerLogEvent',['../group__server.html#gab0600eb7faa5c10a1013bbd5d342fe99',1,'TeamTalk.h']]],
+  ['serverlogevents_1740',['ServerLogEvents',['../group__server.html#ga0a7e8aeaf8dd5fb725d9580969aa8678',1,'TeamTalk.h']]],
+  ['serverproperties_1741',['ServerProperties',['../group__server.html#ga48ca5a39dcb631b81177e83a1fc47853',1,'TeamTalk.h']]],
+  ['serverstatistics_1742',['ServerStatistics',['../group__server.html#gaa9793011320b0fe2f49ffdb65c866d4d',1,'TeamTalk.h']]],
+  ['serverupdatedcallback_1743',['ServerUpdatedCallback',['../group__serverlogevents.html#ga031954e11677f73ee3bab8a91719be4e',1,'TeamTalkSrv.h']]],
+  ['sharewindow_1744',['ShareWindow',['../group__desktopshare.html#ga9d51d3d7c6dcdf9d4e88d0c2be90709f',1,'TeamTalk.h']]],
+  ['sounddevice_1745',['SoundDevice',['../group__sounddevices.html#ga273e220e2fa2c4fdea8c8ce6994755cf',1,'TeamTalk.h']]],
+  ['sounddeviceeffects_1746',['SoundDeviceEffects',['../group__sounddevices.html#gae2f76fd403f14b48c673ba8a6104a4e7',1,'TeamTalk.h']]],
+  ['sounddevicefeature_1747',['SoundDeviceFeature',['../group__sounddevices.html#ga11f120b7bc883410a4a1ff820ed5c51e',1,'TeamTalk.h']]],
+  ['sounddevicefeatures_1748',['SoundDeviceFeatures',['../group__sounddevices.html#ga2e6121f041f67516235ce5c1d8b97e16',1,'TeamTalk.h']]],
+  ['soundlevel_1749',['SoundLevel',['../group__sounddevices.html#ga310c4d63be3f5022effe74d631555fc3',1,'TeamTalk.h']]],
+  ['soundsystem_1750',['SoundSystem',['../group__sounddevices.html#gad3ebfdc3423d53240699d3c78ce60e41',1,'TeamTalk.h']]],
+  ['speexcodec_1751',['SpeexCodec',['../group__codecs.html#ga8bd43c16e75468d2969bcf728f773f0e',1,'TeamTalk.h']]],
+  ['speexdsp_1752',['SpeexDSP',['../group__codecs.html#ga478f4c6f54f31c93a0d4ea2e317431ff',1,'TeamTalk.h']]],
+  ['speexvbrcodec_1753',['SpeexVBRCodec',['../group__codecs.html#ga910d06f2b6de9061573be2c84e4c17d4',1,'TeamTalk.h']]],
+  ['streamtype_1754',['StreamType',['../group__transmission.html#ga86e32f42608ee3978833aca4dec807e5',1,'TeamTalk.h']]],
+  ['streamtypes_1755',['StreamTypes',['../group__transmission.html#ga6c16695e0994a2ee32d4e93c15daeaaa',1,'TeamTalk.h']]],
+  ['subscription_1756',['Subscription',['../group__users.html#ga20857ddd582245f224a79c879da77187',1,'TeamTalk.h']]],
+  ['subscriptions_1757',['Subscriptions',['../group__users.html#ga56f483fd85341c1483c7f1cdf93058bc',1,'TeamTalk.h']]]
+];

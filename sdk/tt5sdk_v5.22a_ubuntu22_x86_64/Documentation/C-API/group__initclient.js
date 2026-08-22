@@ -1,0 +1,37 @@
+var group__initclient =
+[
+    [ "ClientFlag", "group__initclient.html#gaccc8839e3ac6fb5b1f23ef37446dc825", null ],
+    [ "ClientFlags", "group__initclient.html#ga45632f9da11731b15d9bbb90713764b0", null ],
+    [ "TTInstance", "group__initclient.html#ga3c34b9935bd1f63aa90c94cf9639f1c0", null ],
+    [ "ClientFlag", "group__initclient.html#ga58d6e380015b4b1c92c0f09fd6bcfc1c", [
+      [ "CLIENT_CLOSED", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca74a7ca0a423000407d515e604f1db5d0", null ],
+      [ "CLIENT_SNDINPUT_READY", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca82b03535e81a26210be47e4f02d6d026", null ],
+      [ "CLIENT_SNDOUTPUT_READY", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1caba1347d579eb049fb81615bf4ce9b1e6", null ],
+      [ "CLIENT_SNDINOUTPUT_DUPLEX", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca3ee0ecf955e9bbe96ebc74094ab17953", null ],
+      [ "CLIENT_SNDINPUT_VOICEACTIVATED", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1cac778b3669ff5d2257c74d670f3f5b099", null ],
+      [ "CLIENT_SNDINPUT_VOICEACTIVE", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1caa3d800e85a53045f06f7a8e6d1a0bdd6", null ],
+      [ "CLIENT_SNDOUTPUT_MUTE", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca43cb11ee9fee27194f86c8129116170c", null ],
+      [ "CLIENT_SNDOUTPUT_AUTO3DPOSITION", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca5f993074d34d7deb5ebbfb363a3c2b04", null ],
+      [ "CLIENT_VIDEOCAPTURE_READY", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1caffd34a624af8ed4aa334676a696b1fbf", null ],
+      [ "CLIENT_TX_VOICE", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca2ad3ed1638024c9c8bcd1cbc76f5f8a5", null ],
+      [ "CLIENT_TX_VIDEOCAPTURE", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1cad06af915cce000fc5ef7ff47aaa426ed", null ],
+      [ "CLIENT_TX_DESKTOP", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca3c4641b78835fb19442e2559ed0b894a", null ],
+      [ "CLIENT_DESKTOP_ACTIVE", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca840b3551969ef77dd96175de84ecd0d3", null ],
+      [ "CLIENT_MUX_AUDIOFILE", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca6e9fa7fe0d3185baddfa0f93ad4a3693", null ],
+      [ "CLIENT_CONNECTING", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca1f0c0ea7738fb72b3027c77fab910b63", null ],
+      [ "CLIENT_CONNECTED", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca0a688bcbb16a63434cfec434f3c04b84", null ],
+      [ "CLIENT_CONNECTION", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca8934a493a02759c825741f6e4506a41d", null ],
+      [ "CLIENT_AUTHORIZED", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1caa1b074d1e989175f0d96041df68478ee", null ],
+      [ "CLIENT_STREAM_AUDIO", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1cae469f444348128ab5126d565c164d1ac", null ],
+      [ "CLIENT_STREAM_VIDEO", "group__initclient.html#gga58d6e380015b4b1c92c0f09fd6bcfc1ca51aa6bbacfc76df4dbac6dc35b7f3d39", null ]
+    ] ],
+    [ "TT_GetVersion", "group__initclient.html#ga929c494d8dbcfd28712744bdde51270c", null ],
+    [ "TT_InitTeamTalk", "group__initclient.html#gaea369735ecf5c6c75f5a30944f389bbe", null ],
+    [ "TT_SwapTeamTalkHWND", "group__initclient.html#ga5747b70f13343bfec8764183a2b49f63", null ],
+    [ "TT_InitTeamTalkPoll", "group__initclient.html#gaebc89ca414258f4e8228f8af91343e72", null ],
+    [ "TT_CloseTeamTalk", "group__initclient.html#ga93f2c5b3442de8c432e15f0531d057ab", null ],
+    [ "TT_GetMessage", "group__initclient.html#ga34fe8de6133a101aa70574225d7dcae0", null ],
+    [ "TT_PumpMessage", "group__initclient.html#ga2eb567a5d3d0284292adc6c03d503e50", null ],
+    [ "TT_GetFlags", "group__initclient.html#ga80a8e7d232eb05c3733a3bc9edf461dd", null ],
+    [ "TT_SetLicenseInformation", "group__initclient.html#ga601d31a2f571006bb6b4e97330c4c202", null ]
+];
