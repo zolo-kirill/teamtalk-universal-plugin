@@ -21,3 +21,4 @@ inbox/
 
 # Провайдер po-токенов для yt-dlp (не используется)
 bgutil/
+.channel_msg
