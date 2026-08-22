@@ -131,7 +131,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         # radio stations from radio/ folder (m3u playlists grouped by category)
         self.radio = self._load_radio()
         if self.radio:
-            log("radio loaded: %d categories" % len(self.radio))
+            log("radio loaded: %d stations" % len(self.radio))
         self.nickname = NICKNAME
         try:
             n = open(NICKNAME_FILE).read().strip()
@@ -703,28 +703,19 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     # ----- radio stations (m3u playlists) -----
     def _load_radio(self):
-        """Scan BASE_DIR/radio for .m3u files, grouped by category folder."""
-        cats = []
+        """Scan BASE_DIR/radio for .m3u files, flat list of stations."""
+        stations = []
         base = os.path.join(BASE_DIR, "radio")
         if not os.path.isdir(base):
-            return cats
-        # top-level category folders (e.g. "Джаз", "Рок", "ТВ/Кино" …)
-        for cat in sorted(os.listdir(base)):
-            cpath = os.path.join(base, cat)
-            if not os.path.isdir(cpath):
+            return stations
+        for fn in sorted(os.listdir(base)):
+            if not fn.lower().endswith(".m3u"):
                 continue
-            stations = []
-            for root, _, files in os.walk(cpath):
-                for fn in sorted(files):
-                    if not fn.lower().endswith(".m3u"):
-                        continue
-                    full = os.path.join(root, fn)
-                    title, url = self._parse_m3u(full, fn)
-                    if url:
-                        stations.append((title, url))
-            if stations:
-                cats.append((cat, stations))
-        return cats
+            full = os.path.join(base, fn)
+            title, url = self._parse_m3u(full, fn)
+            if url:
+                stations.append((title, url))
+        return stations
 
     def _parse_m3u(self, path, fallback_name):
         """Return (title, stream_url) from an m3u file, or (fallback, None)."""
@@ -748,62 +739,38 @@ class MusicBot(TeamTalk5.TeamTalk):
         return title, url
 
     def _radio_cmd(self, arg):
-        """Radio station browser: категории → станции → запуск."""
+        """Radio station browser: плоский список → запуск по номеру."""
         if not self.radio:
             self._send("Нет папки radio/ с m3u. Положи станции и перезапусти.")
             return
         if not arg:
-            lines = ["📻 Радио (%d категорий):" % len(self.radio)]
-            for i, (cat, _st) in enumerate(self.radio, 1):
-                lines.append("%d. %s" % (i, cat))
-            lines.append("Радио <номер> — станции категории")
+            lines = ["📻 Радио (%d станций):" % len(self.radio)]
+            for i, (t, _u) in enumerate(self.radio, 1):
+                lines.append("%d. %s" % (i, t))
+                if i >= 15:
+                    lines.append("… и ещё %d" % (len(self.radio) - 15))
+                    break
+            lines.append("Радио <номер> — запуск")
             self._send("\n".join(lines))
             return
         if arg.isdigit():
             idx = int(arg) - 1
             if idx < 0 or idx >= len(self.radio):
-                self._send("Нет категории под номером %d (всего %d)." % (idx + 1, len(self.radio)))
+                self._send("Нет станции под номером %d (всего %d)." % (idx + 1, len(self.radio)))
                 return
-            cat, stations = self.radio[idx]
-            lines = ["📻 %s (%d станций):" % (cat, len(stations))]
-            for i, (t, _u) in enumerate(stations, 1):
-                lines.append("%d. %s" % (i, t))
-                if i >= 15:
-                    lines.append("… и ещё %d" % (len(stations) - 15))
-                    break
-            lines.append("Радио <кат> <станция> — запуск")
-            self._send("\n".join(lines))
-            return
-        # "радио <кат> <станция>"
-        m = re.match(r"^(\d+)\s+(\d+)$", arg)
-        if m:
-            ci, si = int(m.group(1)) - 1, int(m.group(2)) - 1
-            if not (0 <= ci < len(self.radio)):
-                self._send("Нет категории %d." % (ci + 1))
-                return
-            cat, stations = self.radio[ci]
-            if not (0 <= si < len(stations)):
-                self._send("В категории «%s» всего %d станций." % (cat, len(stations)))
-                return
-            title, url = stations[si]
+            title, url = self.radio[idx]
             self._play_radio(url, title)
             return
         # текстовый поиск по названию станции
         q = arg.lower()
-        found = []
-        for ci, (cat, stations) in enumerate(self.radio, 1):
-            for si, (t, _u) in enumerate(stations, 1):
-                if q in t.lower() or q in cat.lower():
-                    found.append((ci, si, cat, t))
-            if len(found) >= 10:
-                break
+        found = [(i + 1, t) for i, (t, _u) in enumerate(self.radio) if q in t.lower()]
         if not found:
             self._send("Не нашёл станцию «%s»." % arg)
             return
         lines = ["Нашёл:"]
-        for ci, si, cat, t in found[:10]:
-            lines.append("%s. %s (%s)" % (ci, t, cat))
-        self._send("\n".join(lines) + "\nРадио <кат> <станция> — запуск")
+        for idx, t in found[:10]:
+            lines.append("%d. %s" % (idx, t))
+        self._send("\n".join(lines) + "\nРадио <номер> — запуск")
 
     def _play_radio(self, url, title):
         """Play an internet radio stream directly (no download)."""
@@ -919,7 +886,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._play_search_index(self.search_index - 1)
             return
 
-        # --- радио: радио / радио <N> / радио <кат> <станция> / радио <текст> ---
+        # --- радио: радио / радио <N> / радио <текст> ---
         if cmd.startswith("радио") or cmd.startswith("radio") or cmd == "r":
             arg = text.split(None, 1)[1].strip() if " " in text else ""
             self._radio_cmd(arg)
@@ -1021,7 +988,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "пи — play, п — пауза\n"
             "с — стоп, скип — дальше (очередь)\n"
             "u <url> / ссылка <url> — играть по ссылке (независимо от сервиса)\n"
-            "радио — список станций (радио <кат> <станция> — запуск)\n"
+            "радио — список станций (радио <номер> — запуск)\n"
             "v <1-100> — громкость\n"
             "sv yt / sv ym — сервис\n"
             "cn <ник> — сменить ник бота\n"
