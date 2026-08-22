@@ -157,6 +157,20 @@ URL_RE = re.compile(r"https?://\S+", re.I)
 # FFMpeg/yt-dlp resolve via PATH
 YTDLP = sys.executable and [sys.executable, "-m", "yt_dlp"]
 
+# JS runtime for yt-dlp challenge solving (deno binary; override via config/env).
+YT_JS_RUNTIME = os.environ.get("YT_JS_RUNTIME")
+if YT_JS_RUNTIME is None:
+    YT_JS_RUNTIME = _cfg("general.yt_js_runtime", None, None)
+if not YT_JS_RUNTIME:
+    YT_JS_RUNTIME = "/home/superlisa/.local/bin/deno"
+
+# YouTube po_token provider extractor-arg; empty disables it (e.g. no bgutil server).
+YT_PO_TOKEN = os.environ.get("YT_PO_TOKEN_EXTRACTOR")
+if YT_PO_TOKEN is None:
+    YT_PO_TOKEN = _cfg("general.yt_po_token_extractor", None, None)
+    if YT_PO_TOKEN is None:
+        YT_PO_TOKEN = "youtube:po_token_provider=bgutil:http"
+
 # Max tracks loaded from a playlist (YouTube / Yandex Music). High default so big
 # playlists («Мне нравится» ≈ тысячи треков) load fully; override via config.
 PLAYLIST_LIMIT = int(_cfg("general.playlist_limit", None, 5000))
@@ -483,8 +497,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             "--playlist-items", "1-10",
             "--no-warnings",
             "--print", "%(title)s\t%(url)s",
-            "--extractor-args", "youtube:po_token_provider=bgutil:http",
         ]
+        if YT_PO_TOKEN:
+            cmd += ["--extractor-args", YT_PO_TOKEN]
         ck = _fresh_cookies()
         if ck:
             cmd += ["--cookies", ck]
@@ -548,8 +563,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             "--playlist-items", "1-%d" % limit,
             "--no-warnings",
             "--print", "%(title)s\t%(url)s",
-            "--extractor-args", "youtube:po_token_provider=bgutil:http",
         ]
+        if YT_PO_TOKEN:
+            cmd += ["--extractor-args", YT_PO_TOKEN]
         ck = _fresh_cookies()
         if ck:
             cmd += ["--cookies", ck]
@@ -690,12 +706,14 @@ class MusicBot(TeamTalk5.TeamTalk):
                     "-x",
                     "--audio-format", "mp3",
                     "--audio-quality", "5",
-                    "--js-runtimes", "deno:/home/superlisa/.local/bin/deno",
                     "--remote-components", "ejs:github",
-                    "--extractor-args", "youtube:po_token_provider=bgutil:http",
                     "-o", out + ".%(ext)s",
                     "--print", "%(title)s",
                 ]
+                if YT_JS_RUNTIME:
+                    cmd += ["--js-runtimes", "deno:%s" % YT_JS_RUNTIME]
+                if YT_PO_TOKEN:
+                    cmd += ["--extractor-args", YT_PO_TOKEN]
                 ck = _fresh_cookies(RUTUBE_COOKIES if "rutube.ru" in real_url else COOKIES)
                 if ck:
                     cmd += ["--cookies", ck]
