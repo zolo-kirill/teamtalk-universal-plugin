@@ -134,8 +134,9 @@ URL_RE = re.compile(r"https?://\S+", re.I)
 # FFMpeg/yt-dlp resolve via PATH
 YTDLP = sys.executable and [sys.executable, "-m", "yt_dlp"]
 
-# Max tracks taken from a YouTube playlist into the queue
-PLAYLIST_LIMIT = 100
+# Max tracks loaded from a playlist (YouTube / Yandex Music). High default so big
+# playlists («Мне нравится» ≈ тысячи треков) load fully; override via config.
+PLAYLIST_LIMIT = int(_cfg("general.playlist_limit", None, 5000))
 
 # Voice transmission: raw PCM fed to TT_InsertAudioBlock as STREAMTYPE_VOICE.
 VOICE_RATE = 48000  # Hz
@@ -869,6 +870,23 @@ class MusicBot(TeamTalk5.TeamTalk):
         # audio block, so volume changes take effect instantly for any source.
         self._send("🔊 Громкость: %d%%" % v)
 
+    def _seek(self, delta_s):
+        """Seek the current track by delta_s seconds (negative = backwards)."""
+        if not self.playing or not self.current_orig:
+            self._send("Сейчас ничего не играет.")
+            return
+        cur = self.cur_offset_ms if self.paused else self._elapsed_ms()
+        new_ms = max(0, cur + delta_s * 1000)
+        self.cur_offset_ms = new_ms
+        arrow = "⏪" if delta_s < 0 else "⏩"
+        if self.paused:
+            self._set_status("Paused: %s" % (self.current[1] if self.current else ""))
+            self._send("%s %s → ⏱ %s" % (arrow, ("%dс" % delta_s), _fmt_ms(new_ms)))
+        else:
+            self._set_status("Playing: %s" % (self.current[1] if self.current else ""))
+            self._start_voice(self.current_orig, new_ms)
+            self._send("%s %s → ⏱ %s" % (arrow, ("%dс" % delta_s), _fmt_ms(new_ms)))
+
     def _switch_to(self, key, label):
         """Stop whatever plays and immediately play `key` (used by n/b and direct links)."""
         self.auto_list = False
@@ -909,6 +927,22 @@ class MusicBot(TeamTalk5.TeamTalk):
         u, t = self.playlist[idx]
         self._switch_to(u, "🎵 %d. %s" % (idx + 1, t))
         self.auto_playlist = True
+
+    def _playlist_page_lines(self, page=1, per_page=20):
+        """Numbered page of the loaded playlist (whole list fits via pages)."""
+        if not self.playlist:
+            return ["Список плейлиста пуст. Вставь ссылку на плейлист."]
+        total = len(self.playlist)
+        pages = max(1, (total + per_page - 1) // per_page)
+        page = max(1, min(pages, page))
+        start = (page - 1) * per_page
+        end = min(total, start + per_page)
+        lines = ["📃 Плейлист: %d треков (стр. %d/%d)" % (total, page, pages)]
+        for i in range(start, end):
+            _u, t = self.playlist[i]
+            lines.append("%d. %s" % (i + 1, t[:45]))
+        lines.append("пл <страница> — листать, n/b — следующий/предыдущий трек")
+        return lines
 
     def _do_search(self, query):
         self._send("🔎 Ищу: %s…" % query)
@@ -1055,6 +1089,12 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._set_volume(int(m.group(1)))
             return
 
+        # --- перемотка: sf 5 (вперёд на 5с), sf -5 (назад на 5с) ---
+        m = re.match(r"^sf\s+(-?\d{1,6})$", cmd)
+        if m:
+            self._seek(int(m.group(1)))
+            return
+
         # --- сообщения в канал: cm — вкл/выкл (по умолчанию ответы в личку) ---
         if cmd == "cm":
             self.channel_msg = not self.channel_msg
@@ -1172,6 +1212,16 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._play_search_index(self.search_index - 1)
             return
 
+        # --- плейлист: пл / список / плейлист [<страница>] — полный список ---
+        cmd_first = low.split(None, 1)[0]
+        if cmd_first in ("пл", "список", "плейлист"):
+            parts = text.split(None, 1)
+            page = 1
+            if len(parts) > 1 and parts[1].strip().isdigit():
+                page = int(parts[1].strip())
+            self._send("\n".join(self._playlist_page_lines(page)))
+            return
+
         # --- радио: радио / радио <N> / радио <текст> ---
         if cmd.startswith("радио") or cmd.startswith("radio") or cmd == "r":
             arg = text.split(None, 1)[1].strip() if " " in text else ""
@@ -1272,9 +1322,11 @@ class MusicBot(TeamTalk5.TeamTalk):
     def _help_cmd(self):
         self._send(
             "п <запрос> — поиск (покажет список), играет №1\n"
-            "n — следующий по списку, b — предыдущий\n"
+            "n — следующий, b — предыдущий (по списку или плейлисту)\n"
+            "пл <страница> — полный список плейлиста постранично\n"
             "пи — play, п — пауза\n"
             "с — стоп, скип — дальше (очередь)\n"
+            "sf <секунды> — перемотка (sf -5 — назад)\n"
             "u <url> / ссылка <url> — играть по ссылке (независимо от сервиса)\n"
             "радио — список станций (радио <номер> — запуск)\n"
             "v <1-100> — громкость (мгновенно)\n"
@@ -1462,13 +1514,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                     self.voice_started_at = 0
                     self._set_status("")
                     self.playlist = items
-                    lines = ["📃 Плейлист (%d):" % len(items)]
-                    for i, (u, t) in enumerate(items[:5], 1):
-                        lines.append("%d. %s" % (i, t[:50]))
-                    if len(items) > 5:
-                        lines.append("… и ещё %d треков" % (len(items) - 5))
-                    lines.append("n — следующий, b — предыдущий, с — стоп")
-                    self._send("\n".join(lines))
+                    self._send("\n".join(self._playlist_page_lines(1)))
                     self._play_playlist_index(0)
                 elif kind == "advance":
                     self._advance(silent=True)
