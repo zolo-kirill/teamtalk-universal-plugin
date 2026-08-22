@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Music bot for TeamTalk: plays audio from URLs into a voice channel."""
+import array
 import ctypes
 import json
 import os
@@ -49,6 +50,7 @@ INBOX_DIR = os.path.join(BASE_DIR, "inbox")  # files relayed from Telegram
 os.makedirs(INBOX_DIR, exist_ok=True)
 
 NICKNAME_FILE = os.path.join(BASE_DIR, ".nickname")
+CHANNEL_MSG_FILE = os.path.join(BASE_DIR, ".channel_msg")
 
 TG_TOKEN = os.environ.get("TG_TOKEN", "").strip()  # optional: own Telegram bot that relays files
 
@@ -92,6 +94,13 @@ def log(msg):
 def _fmt_ms(ms):
     s = int(ms) // 1000
     return "%d:%02d" % (s // 60, s % 60)
+
+
+def _restart_bot_soon():
+    """Exit the process shortly; the service supervisor (restart=always) relaunches."""
+    time.sleep(1.5)
+    log("restarting by command")
+    os._exit(0)
 
 
 class MusicBot(TeamTalk5.TeamTalk):
@@ -139,11 +148,38 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self.nickname = n
         except Exception:
             pass
+        # reply targeting: PM to the command author, optionally mirrored to channel
+        self.reply_user_id = 0  # who sent the last command → PM replies
+        self.channel_msg = self._load_channel_msg()  # mirror replies to channel (cm)
         # optional Telegram relay: an own bot that forwards files into the channel
         self._tg_offset = 0
         if TG_TOKEN:
             threading.Thread(target=self._tg_poll, daemon=True, name="tg-poll").start()
             log("telegram relay enabled")
+
+    def _load_channel_msg(self):
+        try:
+            return open(CHANNEL_MSG_FILE).read().strip() == "1"
+        except Exception:
+            return False
+
+    def _save_channel_msg(self):
+        try:
+            with open(CHANNEL_MSG_FILE, "w") as f:
+                f.write("1" if self.channel_msg else "0")
+        except Exception as e:
+            log("channel_msg save err: %s" % e)
+
+    def _scale_pcm(self, chunk):
+        """Apply the current volume to a raw s16 mono PCM block (no ffmpeg restart)."""
+        v = self.volume / 100.0
+        if v >= 0.999:
+            return chunk
+        a = array.array("h")
+        a.frombytes(chunk)
+        for i in range(len(a)):
+            a[i] = int(a[i] * v)
+        return a.tobytes()
 
     # ----- helpers ---------------------------------------------------
     # ----- SDK wrappers (bindings need explicit byte strings) --------
@@ -245,16 +281,27 @@ class MusicBot(TeamTalk5.TeamTalk):
             return None
 
     def _send(self, text):
-        if not (self.logged_in and self.my_channel_id):
-            log("_send skip: logged_in=%s chan=%s" % (self.logged_in, self.my_channel_id))
+        if not self.logged_in:
+            log("_send skip: logged_in=%s" % self.logged_in)
             return
         try:
-            msgs = buildTextMessage(
-                text, TextMsgType.MSGTYPE_CHANNEL, nChannelID=self.my_channel_id
-            )
-            for m in msgs:
-                r = self.doTextMessage(m)
-                log("_send(%r) -> %s" % (text, r))
+            sent_pm = False
+            if self.reply_user_id:
+                msgs = buildTextMessage(
+                    text, TextMsgType.MSGTYPE_USER, nToUserID=self.reply_user_id,
+                    nChannelID=0, nFromUserID=self.my_user_id,
+                )
+                for m in msgs:
+                    self.doTextMessage(m)
+                sent_pm = True
+            to_channel = bool(self.channel_msg) or not self.reply_user_id
+            if to_channel and self.my_channel_id:
+                msgs = buildTextMessage(
+                    text, TextMsgType.MSGTYPE_CHANNEL, nChannelID=self.my_channel_id
+                )
+                for m in msgs:
+                    self.doTextMessage(m)
+            log("_send(%r) pm=%s chan=%s" % (text, sent_pm, to_channel and self.my_channel_id > 0))
         except Exception as e:
             log("send error: %s" % e)
 
@@ -484,8 +531,6 @@ class MusicBot(TeamTalk5.TeamTalk):
         if offset_ms > 0:
             cmd += ["-ss", "%.3f" % (offset_ms / 1000.0)]
         cmd += ["-i", path, "-vn", "-f", "s16le", "-ac", "1", "-ar", str(VOICE_RATE)]
-        if self.volume < 100:
-            cmd += ["-af", "volume=%.3f" % (self.volume / 100.0)]
         cmd += ["-"]
         try:
             proc = subprocess.Popen(
@@ -525,6 +570,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                     next_slot = time.monotonic()  # behind: don't compound backlog
                 chunk = buf[:VOICE_CHUNK_BYTES]
                 buf = buf[VOICE_CHUNK_BYTES:]
+                chunk = self._scale_pcm(chunk)
                 raw = (ctypes.c_char * VOICE_CHUNK_BYTES).from_buffer_copy(chunk)
                 ab = TeamTalk5.AudioBlock()
                 ab.nStreamID = stream_id
@@ -548,6 +594,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                     chunk = buf[i:i + VOICE_CHUNK_BYTES]
                     if len(chunk) < VOICE_CHUNK_BYTES:
                         chunk += b"\x00" * (VOICE_CHUNK_BYTES - len(chunk))
+                    chunk = self._scale_pcm(chunk)
                     raw = (ctypes.c_char * VOICE_CHUNK_BYTES).from_buffer_copy(chunk)
                     ab = TeamTalk5.AudioBlock()
                     ab.nStreamID = stream_id
@@ -643,14 +690,9 @@ class MusicBot(TeamTalk5.TeamTalk):
     def _set_volume(self, v):
         v = max(1, min(100, v))
         self.volume = v
+        # No ffmpeg restart needed: _scale_pcm applies the new gain to the next
+        # audio block, so volume changes take effect instantly for any source.
         self._send("🔊 Громкость: %d%%" % v)
-        if self.playing and self.current_orig:
-            self._restart_for_volume()
-
-    def _restart_for_volume(self):
-        orig = self.current_orig
-        offset = self._elapsed_ms()
-        self.api_q.put(("restart", orig, offset))
 
     def _switch_to(self, key, label):
         """Stop whatever plays and immediately play `key` (used by n/b and direct links)."""
@@ -805,11 +847,26 @@ class MusicBot(TeamTalk5.TeamTalk):
         text = text.strip()
         low = text.lower()
         cmd = low[1:] if low.startswith("/") else low
+        if from_user:
+            self.reply_user_id = from_user
 
         # --- громкость: v 100 / v 50 / громкость 30 / volume 80 ---
         m = re.match(r"^(?:v|громкость|громко|volume)\s+(\d{1,3})$", cmd)
         if m:
             self._set_volume(int(m.group(1)))
+            return
+
+        # --- сообщения в канал: cm — вкл/выкл (по умолчанию ответы в личку) ---
+        if cmd == "cm":
+            self.channel_msg = not self.channel_msg
+            self._save_channel_msg()
+            self._send("Сообщения в канал: %s" % ("вкл ✅" if self.channel_msg else "выкл ⭕"))
+            return
+
+        # --- перезапуск бота: rs ---
+        if cmd in ("rs", "рестарт", "restart", "перезагрузка"):
+            self._send("🔄 Перезапускаюсь…")
+            threading.Thread(target=_restart_bot_soon, daemon=True).start()
             return
 
         # --- выбор сервиса: sv yt / sv ym / sv ---
@@ -1003,10 +1060,12 @@ class MusicBot(TeamTalk5.TeamTalk):
             "с — стоп, скип — дальше (очередь)\n"
             "u <url> / ссылка <url> — играть по ссылке (независимо от сервиса)\n"
             "радио — список станций (радио <номер> — запуск)\n"
-            "v <1-100> — громкость\n"
+            "v <1-100> — громкость (мгновенно)\n"
+            "cm — сообщения в канал вкл/выкл (по умолчанию ответы в личку)\n"
             "sv yt / sv ym — сервис\n"
             "cn <ник> — сменить ник бота\n"
             "lf <путь> — играть локальный файл\n"
+            "rs — перезапустить бота\n"
             "очередь, статус, помощь\n"
             "/channel <путь> — сменить канал"
         )
