@@ -180,6 +180,11 @@ VOICE_RATE = 48000  # Hz
 VOICE_CHUNK = 960   # samples per block (20 ms at 48 kHz)
 VOICE_CHUNK_BYTES = VOICE_CHUNK * 2  # s16 mono
 
+# Playback through PulseAudio: when set, the track is played by ffmpeg into
+# this sink and captured back from its monitor, so anything audible on the
+# machine can be routed into the channel. Empty = decode straight to PCM.
+PULSE_SINK = _cfg("general.pulse_sink", None, "") or ""
+
 
 def log(msg):
     print("%s %s" % (time.strftime("%H:%M:%S"), msg), flush=True)
@@ -781,17 +786,43 @@ class MusicBot(TeamTalk5.TeamTalk):
         t.start()
 
     def _voice_worker(self, path, offset_ms):
-        """Decode the audio file to raw PCM and feed it to TeamTalk as voice."""
-        cmd = ["ffmpeg", "-y"]
-        if offset_ms > 0:
-            cmd += ["-ss", "%.3f" % (offset_ms / 1000.0)]
-        cmd += ["-i", path, "-vn", "-f", "s16le", "-ac", "1", "-ar", str(VOICE_RATE)]
-        cmd += ["-"]
+        """Play audio to TeamTalk as voice.
+
+        With PULSE_SINK set, ffmpeg plays the track into that PulseAudio sink
+        (real-time via -re) and parec captures the sink's monitor back, so the
+        bot relays whatever is audible on the machine. Otherwise ffmpeg decodes
+        the file straight to raw PCM — no sound devices involved.
+        """
+        pulse = PULSE_SINK
+        cap = None  # parec process (pulse mode only)
         try:
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            if pulse:
+                cmd = ["ffmpeg", "-y"]
+                if offset_ms > 0:
+                    cmd += ["-ss", "%.3f" % (offset_ms / 1000.0)]
+                cmd += ["-re", "-i", path, "-vn", "-f", "pulse", pulse]
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                cap = subprocess.Popen(
+                    ["parec", "--device=%s.monitor" % pulse, "--format=s16le",
+                     "--rate", str(VOICE_RATE), "--channels=1"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                src = cap.stdout
+            else:
+                cmd = ["ffmpeg", "-y"]
+                if offset_ms > 0:
+                    cmd += ["-ss", "%.3f" % (offset_ms / 1000.0)]
+                cmd += ["-i", path, "-vn", "-f", "s16le", "-ac", "1",
+                        "-ar", str(VOICE_RATE), "-"]
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                src = proc.stdout
         except Exception as e:
             self.api_q.put(("voice_error", "ffmpeg: %s" % str(e)[:120]))
             return
@@ -801,22 +832,27 @@ class MusicBot(TeamTalk5.TeamTalk):
         buf = b""
         block_dur = VOICE_CHUNK / float(VOICE_RATE)  # 0.02 s per 20 ms block
         next_slot = time.monotonic()
+        drain_until = None  # pulse mode: tail-drain deadline after player exits
         try:
             while not self.voice_stop.is_set():
+                if pulse and proc.poll() is not None and drain_until is None:
+                    drain_until = time.monotonic() + 0.4
+                if len(buf) < VOICE_CHUNK_BYTES:
+                    r, _, _ = select.select([src], [], [], 0.1)
+                    if r:
+                        data = src.read(VOICE_CHUNK_BYTES)
+                        if not data:
+                            finished = True
+                            break
+                        buf += data
+                if pulse and drain_until is not None and time.monotonic() >= drain_until:
+                    finished = True
+                    break
+                if len(buf) < VOICE_CHUNK_BYTES:
+                    continue  # partial/empty read: wait for a full block
                 # Feed blocks on a strict 20 ms schedule. A fixed sleep after
                 # each insert drifts (read + insert take time) and stutters;
                 # sleeping to the exact next slot keeps the stream smooth.
-                if len(buf) < VOICE_CHUNK_BYTES:
-                    r, _, _ = select.select([proc.stdout], [], [], 0.1)
-                    if not r:
-                        continue
-                    data = proc.stdout.read(VOICE_CHUNK_BYTES)
-                    if not data:
-                        finished = True
-                        break
-                    buf += data
-                    if len(buf) < VOICE_CHUNK_BYTES:
-                        continue  # partial read: wait for a full block
                 next_slot += block_dur
                 delay = next_slot - time.monotonic()
                 if delay > 0:
@@ -866,11 +902,12 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self.insertAudioBlockEnd()
             except Exception:
                 pass
-            try:
-                if proc.poll() is None:
-                    proc.kill()
-            except Exception:
-                pass
+            for p in (proc, cap):
+                try:
+                    if p is not None and p.poll() is None:
+                        p.kill()
+                except Exception:
+                    pass
             self.voice_proc = None
             if finished:
                 self.api_q.put(("voice_finished", path))
