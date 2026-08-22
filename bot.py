@@ -114,7 +114,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._last_err_sent = 0
         self.paused = False
         self.volume = 100
-        self.service = "yt"  # "yt" = YouTube, "rt" = Rutube, "ym" = Yandex.Music
+        self.service = "yt"  # "yt" = YouTube, "ym" = Yandex.Music
         self.cur_offset_ms = 0
         self.segment_started_at = 0
         self.current_orig = None
@@ -361,13 +361,6 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _download_worker(self, url, title):
         real_url = url
-        if url.startswith("rutubesearch1:"):
-            q = url.split(":", 1)[1]
-            self.api_q.put(("status", "🔎 Ищу на Rutube: %s…" % q))
-            real_url = self._rutube_search(q)
-            if not real_url:
-                self.api_q.put(("download_fail", url, title, "Поиск Rutube заблокирован их защитой от ботов. Вставь прямую ссылку на видео: https://rutube.ru/video/..."))
-                return
         if url.startswith("ytsearch1:"):
             q = url.split(":", 1)[1]
             self.api_q.put(("status", "🔎 Ищу на YouTube: %s…" % q))
@@ -460,23 +453,6 @@ class MusicBot(TeamTalk5.TeamTalk):
                     continue
                 self.api_q.put(("download_fail", url, title, str(e)[:300]))
                 return
-
-    def _rutube_search(self, query):
-        try:
-            url = "https://rutube.ru/api/search/video/?query=%s&format=json" % urllib.parse.quote(query)
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=20) as r:
-                data = json.loads(r.read().decode("utf-8", "ignore"))
-            results = data.get("results") or []
-            if not results:
-                return None
-            vid = results[0].get("id")
-            if not vid:
-                return None
-            return "https://rutube.ru/video/%s/" % vid
-        except Exception as e:
-            log("rutube search error: %s" % e)
-            return None
 
     def _set_status(self, text):
         """Set the bot's TeamTalk status line (visible in the client)."""
@@ -732,26 +708,23 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._set_volume(int(m.group(1)))
             return
 
-        # --- выбор сервиса: sv yt / sv rt / sv ---
+        # --- выбор сервиса: sv yt / sv ym / sv ---
         first = cmd.split(None, 1)[0]
         if first in ("sv", "svc", "сервис"):
             parts = text.split(None, 1)
             if len(parts) < 2:
-                cur = {"yt": "YouTube", "rt": "Rutube", "ym": "Яндекс.Музыка"}.get(self.service, "?")
-                self._send("Сейчас: %s. Сменить: sv yt, sv rt или sv ym." % cur)
+                cur = {"yt": "YouTube", "ym": "Яндекс.Музыка"}.get(self.service, "?")
+                self._send("Сейчас: %s. Сменить: sv yt или sv ym." % cur)
                 return
             svc = parts[1].strip().lower()
             if svc in ("yt", "youtube", "ютуб", "ютюб"):
                 self.service = "yt"
                 self._send("🎬 Сервис: YouTube.")
-            elif svc in ("rt", "rutube"):
-                self.service = "rt"
-                self._send("📺 Сервис: Rutube.")
             elif svc in ("ym", "ya", "yandex", "яндекс", "яндекс музыка", "ямузыка"):
                 self.service = "ym"
                 self._send("🎵 Сервис: Яндекс.Музыка.")
             else:
-                self._send("Не знаю сервис «%s». Доступно: yt (YouTube), rt (Rutube), ym (Яндекс.Музыка)." % svc)
+                self._send("Не знаю сервис «%s». Доступно: yt (YouTube), ym (Яндекс.Музыка)." % svc)
             return
 
         # --- смена ника: cn <ник> ---
@@ -863,10 +836,18 @@ class MusicBot(TeamTalk5.TeamTalk):
             u = URL_RE.search(query)
             if u:
                 self._switch_to(u.group(0), u.group(0))
-            elif self.service == "rt":
-                self._enqueue_url("rutubesearch1:" + query, "📺 %s" % query)
             else:
                 self._do_search(query)
+            return
+
+        # --- играть по прямой ссылке независимо от сервиса: ссылка <url> / link <url> ---
+        m = re.match(r"^(?:ссылка|link|url)\s+(\S.*)$", low)
+        if m:
+            u = URL_RE.search(m.group(1))
+            if not u:
+                self._send("Дай ссылку: ссылка https://…")
+                return
+            self._switch_to(u.group(0), u.group(0))
             return
 
         # --- bare ссылка ---
@@ -910,8 +891,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             "n — следующий по списку, b — предыдущий\n"
             "пи — play, п — пауза\n"
             "с — стоп, скип — дальше (очередь)\n"
+            "ссылка <url> — играть по ссылке (независимо от сервиса)\n"
             "v <1-100> — громкость\n"
-            "sv yt / sv rt / sv ym — сервис\n"
+            "sv yt / sv ym — сервис\n"
             "cn <ник> — сменить ник бота\n"
             "lf <путь> — играть локальный файл\n"
             "очередь, статус, помощь\n"
