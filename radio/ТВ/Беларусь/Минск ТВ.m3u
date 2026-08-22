@@ -1,0 +1,3 @@
+#EXTM3U
+#EXTINF:-1,Минск ТВ
+http://178.124.183.150:80/hls/CH_MINSKTV2_HLS/variant.m3u8

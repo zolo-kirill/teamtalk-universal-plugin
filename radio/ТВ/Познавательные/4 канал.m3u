@@ -1,0 +1,3 @@
+#EXTM3U
+#EXTINF:-1,4 канал
+http://tele2dvrnat01-02.cdnvideo.ru:80/stream/NAT_EKB1/hls/1024x576@2024/playlist.m3u8
