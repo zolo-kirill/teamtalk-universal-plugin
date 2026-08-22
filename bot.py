@@ -340,6 +340,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "--playlist-items", "1-10",
             "--no-warnings",
             "--print", "%(title)s\t%(url)s",
+            "--extractor-args", "youtube:po_token_provider=bgutil:http",
         ]
         if COOKIES:
             cmd += ["--cookies", COOKIES]
@@ -416,8 +417,9 @@ class MusicBot(TeamTalk5.TeamTalk):
                     "-x",
                     "--audio-format", "mp3",
                     "--audio-quality", "5",
-                    "--js-runtimes", "node",
+                    "--js-runtimes", "deno:/home/superlisa/.local/bin/deno",
                     "--remote-components", "ejs:github",
+                    "--extractor-args", "youtube:po_token_provider=bgutil:http",
                     "-o", out + ".%(ext)s",
                     "--print", "%(title)s",
                 ]
