@@ -505,20 +505,28 @@ class MusicBot(TeamTalk5.TeamTalk):
         return items
 
     def _is_ym_playlist_url(self, url):
-        return bool(re.search(r"music\.yandex\.[^/]+/users/[^/]+/playlists/\d+", url))
+        return bool(re.search(r"music\.yandex\.[^/]+/(?:users/[^/]+/playlists/\d+|playlists/[^/]+)", url))
 
     def _ym_playlist_items(self, url, limit=PLAYLIST_LIMIT):
-        """Return list of (ymtrack:<id>, label) for a Yandex Music playlist."""
+        """Return list of (ymtrack:<id>, label) for a Yandex Music playlist.
+
+        Supports both link shapes:
+          music.yandex.ru/users/<login>/playlists/<kind>
+          music.yandex.ru/playlists/lk.<uuid>   (personal/shared playlist links)
+        """
         if not YM_TOKEN:
             return []
         m = re.search(r"music\.yandex\.[^/]+/users/([^/]+)/playlists/(\d+)", url)
-        if not m:
-            return []
-        owner, kind = m.group(1), m.group(2)
+        m2 = re.search(r"music\.yandex\.[^/]+/playlists/([^/]+)", url)
         try:
             from yandex_music import Client
             client = Client(YM_TOKEN).init()
-            pl = client.users_playlists(kind=int(kind), user_id=owner)
+            if m:
+                pl = client.users_playlists(kind=int(m.group(2)), user_id=m.group(1))
+            elif m2:
+                pl = client.playlist(m2.group(1))
+            else:
+                return []
             if not pl:
                 return []
             items = []
