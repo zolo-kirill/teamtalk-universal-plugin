@@ -1,0 +1,57 @@
+{
+    "config_version": 1,
+    "general": {
+        "language": "ru",
+        "send_channel_messages": true,
+        "default_service": "yt",
+        "start_commands": [],
+        "delete_uploaded_files_after": 300,
+        "time_format": "%H:%M"
+    },
+    "player": {
+        "default_volume": 10,
+        "max_volume": 100
+    },
+    "teamtalk": {
+        "hostname": "",
+        "tcp_port": 10333,
+        "udp_port": 10333,
+        "encrypted": false,
+        "nickname": "MusicBot",
+        "username": "",
+        "password": "",
+        "channel": "",
+        "channel_password": "",
+        "reconnection_attempts": -1,
+        "reconnection_timeout": 10
+    },
+    "services": {
+        "yt": {
+            "enabled": true,
+            "cookiefile_path": ""
+        },
+        "rt": {
+            "enabled": true,
+            "cookiefile_path": ""
+        },
+        "ym": {
+            "enabled": true,
+            "token": ""
+        },
+        "vk": {
+            "enabled": false,
+            "token": ""
+        }
+    },
+    "telegram_relay": {
+        "enabled": false,
+        "token": ""
+    },
+    "logger": {
+        "log": true,
+        "level": "INFO",
+        "file_name": "bot.log",
+        "max_file_size": 0,
+        "backup_count": 0
+    }
+}

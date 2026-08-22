@@ -34,16 +34,68 @@ def _b(s):
     """TeamTalk ctypes bindings expect UTF-8 bytes (c_char_p) on Linux."""
     return s.encode("utf-8") if isinstance(s, str) else s
 
-HOST = os.environ.get("TEAMTALK_HOST", "example.com")
-TCP_PORT = int(os.environ.get("TEAMTALK_TCP_PORT", "10333"))
-UDP_PORT = int(os.environ.get("TEAMTALK_UDP_PORT", "10333"))
-NICKNAME = os.environ.get("TEAMTALK_NICKNAME", "MusicBot")
-USERNAME = os.environ.get("TEAMTALK_USERNAME", "example")
-PASSWORD = os.environ.get("TEAMTALK_PASSWORD", "")
-CLIENTNAME = "teamtalk-music-bot"
-CHANNEL = os.environ.get("TEAMTALK_CHANNEL", "")  # empty = root channel
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ---- config: JSON file in the TtMediaBot style ----
+# config.json (gitignored) overrides config_default.json; env vars are a fallback.
+def _deep_merge(base, over):
+    out = dict(base or {})
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _load_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+CONFIG_PATH = os.environ.get("CONFIG") or os.path.join(BASE_DIR, "config.json")
+CFG = _deep_merge(
+    _load_json(os.path.join(BASE_DIR, "config_default.json")),
+    _load_json(CONFIG_PATH),
+)
+
+
+def _cfg(path, env=None, default=None):
+    """Value from CFG by dotted path; env var and default as fallback."""
+    node = CFG
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            node = None
+            break
+        node = node[part]
+    if isinstance(node, (dict, list)):
+        if node:
+            return node
+    elif node is not None and node != "":
+        return node
+    if env and env in os.environ and os.environ.get(env) != "":
+        return os.environ[env]
+    return default
+
+
+HOST = str(_cfg("teamtalk.hostname", "TEAMTALK_HOST", "example.com"))
+TCP_PORT = int(_cfg("teamtalk.tcp_port", "TEAMTALK_TCP_PORT", 10333))
+UDP_PORT = int(_cfg("teamtalk.udp_port", "TEAMTALK_UDP_PORT", 10333))
+NICKNAME = str(_cfg("teamtalk.nickname", "TEAMTALK_NICKNAME", "MusicBot"))
+USERNAME = str(_cfg("teamtalk.username", "TEAMTALK_USERNAME", "example"))
+PASSWORD = str(_cfg("teamtalk.password", "TEAMTALK_PASSWORD", ""))
+CHANNEL = str(_cfg("teamtalk.channel", "TEAMTALK_CHANNEL", ""))  # empty = root channel
+CHANNEL_PASSWORD = str(_cfg("teamtalk.channel_password", "TEAMTALK_CHANNEL_PASSWORD", ""))
+DEFAULT_VOLUME = int(_cfg("player.default_volume", None, 10))
+MAX_VOLUME = int(_cfg("player.max_volume", None, 100))
+DEFAULT_SERVICE = str(_cfg("general.default_service", None, "yt"))
+DEFAULT_CHANNEL_MSG = bool(_cfg("general.send_channel_messages", None, True))
+START_COMMANDS = list(_cfg("general.start_commands", None, []))
+CLIENTNAME = "teamtalk-music-bot"
+
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
 INBOX_DIR = os.path.join(BASE_DIR, "inbox")  # files relayed from Telegram
@@ -52,29 +104,30 @@ os.makedirs(INBOX_DIR, exist_ok=True)
 NICKNAME_FILE = os.path.join(BASE_DIR, ".nickname")
 CHANNEL_MSG_FILE = os.path.join(BASE_DIR, ".channel_msg")
 
-TG_TOKEN = os.environ.get("TG_TOKEN", "").strip()  # optional: own Telegram bot that relays files
+TG_TOKEN = str(_cfg("telegram_relay.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
 
 # Optional YouTube cookies to bypass bot-check on restricted videos.
-COOKIES = os.environ.get("TEAMTALK_COOKIES") or os.path.join(
+COOKIES = _cfg("services.yt.cookiefile_path", "TEAMTALK_COOKIES", None) or os.path.join(
     BASE_DIR, "..", ".secrets", "cookies.txt"
 )
 if not os.path.isfile(COOKIES):
     COOKIES = None
 
 # Optional Rutube cookies for auth-gated video downloads (search stays blocked by their bot-protection).
-RUTUBE_COOKIES = os.environ.get("TEAMTALK_RUTUBE_COOKIES") or os.path.join(
+RUTUBE_COOKIES = _cfg("services.rt.cookiefile_path", "TEAMTALK_RUTUBE_COOKIES", None) or os.path.join(
     BASE_DIR, "..", ".secrets", "rutube_cookies.txt"
 )
 if not os.path.isfile(RUTUBE_COOKIES):
     RUTUBE_COOKIES = None
 
-# Optional Yandex Music OAuth token (from .secrets/ym_token.txt or TEAMTALK_YM_TOKEN).
-YM_TOKEN = None
-_ym_path = os.environ.get("TEAMTALK_YM_TOKEN") or os.path.join(
-    BASE_DIR, "..", ".secrets", "ym_token.txt"
-)
-if os.path.isfile(_ym_path):
-    YM_TOKEN = open(_ym_path, encoding="utf-8").read().strip()
+# Optional Yandex Music OAuth token (config services.ym.token, else .secrets/ym_token.txt).
+YM_TOKEN = str(_cfg("services.ym.token", None, "")).strip()
+if not YM_TOKEN:
+    _ym_path = os.environ.get("TEAMTALK_YM_TOKEN") or os.path.join(
+        BASE_DIR, "..", ".secrets", "ym_token.txt"
+    )
+    if os.path.isfile(_ym_path):
+        YM_TOKEN = open(_ym_path, encoding="utf-8").read().strip()
 
 URL_RE = re.compile(r"https?://\S+", re.I)
 
@@ -122,8 +175,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.connecting = False
         self._last_err_sent = 0
         self.paused = False
-        self.volume = 10
-        self.service = "yt"  # "yt" = YouTube, "ym" = Yandex.Music
+        self.volume = min(DEFAULT_VOLUME, MAX_VOLUME)
+        self.service = DEFAULT_SERVICE  # "yt" = YouTube, "ym" = Yandex.Music
         self.cur_offset_ms = 0
         self.segment_started_at = 0
         self.current_orig = None
@@ -161,7 +214,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         try:
             return open(CHANNEL_MSG_FILE).read().strip() == "1"
         except Exception:
-            return False
+            return DEFAULT_CHANNEL_MSG
 
     def _save_channel_msg(self):
         try:
@@ -688,7 +741,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._send("Сейчас ничего не играет.")
 
     def _set_volume(self, v):
-        v = max(1, min(100, v))
+        v = max(1, min(MAX_VOLUME, v))
         self.volume = v
         # No ffmpeg restart needed: _scale_pcm applies the new gain to the next
         # audio block, so volume changes take effect instantly for any source.
@@ -988,7 +1041,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             if not cid:
                 self._send("Канал не найден: %s" % path)
                 return
-            self.doJoinChannelByID(cid, "")
+            self.doJoinChannelByID(cid, CHANNEL_PASSWORD)
             self.play_channel_id = cid
             self._send("Перехожу в канал: %s" % path)
             return
@@ -1102,7 +1155,19 @@ class MusicBot(TeamTalk5.TeamTalk):
             cid = self.getRootChannelID()
         self.play_channel_id = cid
         log("joining channel id %d (path %s)" % (cid, target))
-        self.doJoinChannelByID(cid, "")
+        self.doJoinChannelByID(cid, CHANNEL_PASSWORD)
+        if START_COMMANDS:
+            threading.Thread(target=self._run_startup_commands, daemon=True).start()
+
+    def _run_startup_commands(self):
+        time.sleep(3)
+        for c in START_COMMANDS:
+            try:
+                log("startup cmd: %s" % c)
+                self._handle_cmd(c)
+            except Exception as e:
+                log("startup cmd error: %s" % e)
+            time.sleep(1)
 
     def onCmdUserJoinedChannel(self, user):
         try:
