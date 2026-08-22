@@ -113,7 +113,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.connecting = False
         self._last_err_sent = 0
         self.paused = False
-        self.volume = 100
+        self.volume = 10
         self.service = "yt"  # "yt" = YouTube, "ym" = Yandex.Music
         self.cur_offset_ms = 0
         self.segment_started_at = 0
@@ -840,12 +840,12 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._do_search(query)
             return
 
-        # --- играть по прямой ссылке независимо от сервиса: ссылка <url> / link <url> ---
-        m = re.match(r"^(?:ссылка|link|url)\s+(\S.*)$", low)
+        # --- играть по прямой ссылке независимо от сервиса: u <url> / ссылка <url> / link <url> ---
+        m = re.match(r"^(?:u|ссылка|link|url)\s+(\S.*)$", low)
         if m:
             u = URL_RE.search(m.group(1))
             if not u:
-                self._send("Дай ссылку: ссылка https://…")
+                self._send("Дай ссылку: u https://…")
                 return
             self._switch_to(u.group(0), u.group(0))
             return
@@ -891,7 +891,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "n — следующий по списку, b — предыдущий\n"
             "пи — play, п — пауза\n"
             "с — стоп, скип — дальше (очередь)\n"
-            "ссылка <url> — играть по ссылке (независимо от сервиса)\n"
+            "u <url> / ссылка <url> — играть по ссылке (независимо от сервиса)\n"
             "v <1-100> — громкость\n"
             "sv yt / sv ym — сервис\n"
             "cn <ник> — сменить ник бота\n"
