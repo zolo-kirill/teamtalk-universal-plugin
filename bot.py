@@ -510,6 +510,28 @@ class MusicBot(TeamTalk5.TeamTalk):
                 break
         return items
 
+    def _canonical_yt_url(self, url):
+        """YouTube IDs are case-sensitive: a lowercased pasted link fails with
+        'Video unavailable'. Recover the canonical spelling by searching the id
+        text and picking the result whose id matches case-insensitively."""
+        m = re.search(r"(?:watch\?v=|youtu\.be/)([A-Za-z0-9_-]{11})", url)
+        if not m:
+            return url
+        vid = m.group(1)
+        if not re.search(r"[A-Za-z]", vid):
+            return url
+        try:
+            items = self._yt_search_list(vid)
+        except Exception:
+            return url
+        for it in items:
+            f = re.search(r"(?:watch\?v=|youtu\.be/)([A-Za-z0-9_-]{11})", it["key"])
+            if f and f.group(1).lower() == vid.lower():
+                if f.group(1) != vid:
+                    return url.replace(vid, f.group(1))
+                break
+        return url
+
     def _is_yt_playlist_url(self, url):
         low = url.lower()
         if "youtube.com" not in low and "youtu.be" not in low:
@@ -645,6 +667,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self.api_q.put(("download_fail", url, title, ym_title or "не нашёл"))
                 return
             title = ym_title or title
+        canon_done = False
         for attempt in range(1, 4):
             try:
                 out = os.path.join(CACHE_DIR, uuid.uuid4().hex)
@@ -684,6 +707,14 @@ class MusicBot(TeamTalk5.TeamTalk):
                 mp3 = out + ".mp3"
                 if rc != 0 or not os.path.exists(mp3):
                     err_text = (stderr or stdout or "yt-dlp failed").strip()
+                    if ("Video unavailable" in err_text and not canon_done
+                            and ("youtube.com/watch?v=" in real_url or "youtu.be/" in real_url)):
+                        new_url = self._canonical_yt_url(real_url)
+                        if new_url != real_url:
+                            log("yt id case fix: %s -> %s" % (real_url, new_url))
+                            real_url = new_url
+                            canon_done = True
+                            continue
                     if "Sign in to confirm" in err_text or "LOGIN_REQUIRED" in err_text:
                         self.api_q.put(("download_fail", url, title, "YouTube заблокировал это видео на нашем сервере (Sign in to confirm you're not a bot). Попробуй другой запрос или прямую ссылку — популярные видео обычно играют."))
                         return
