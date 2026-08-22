@@ -1,6 +1,8 @@
 # Секреты — никогда не коммитить
 .secrets/
 *.env
+yt_cookies.txt
+rutube_cookies.txt
 
 # Python
 __pycache__/

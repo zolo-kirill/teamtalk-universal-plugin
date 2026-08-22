@@ -120,6 +120,29 @@ RUTUBE_COOKIES = _cfg("services.rt.cookiefile_path", "TEAMTALK_RUTUBE_COOKIES", 
 if not os.path.isfile(RUTUBE_COOKIES):
     RUTUBE_COOKIES = None
 
+
+def _fresh_cookies(src=None):
+    """yt-dlp rewrites the --cookies file in place on every run, stripping the
+    signed-in auth cookies (SID/PSID/etc). Hand it a per-run writable COPY so
+    the master file keeps the full session and YouTube bot-check stays solved."""
+    src = src or COOKIES
+    if not src or not os.path.isfile(src):
+        return None
+    dst = os.path.join(CACHE_DIR, "ck_%s.txt" % uuid.uuid4().hex[:10])
+    try:
+        shutil.copyfile(src, dst)
+        return dst
+    except Exception:
+        return None
+
+
+def _drop_cookies(path):
+    if path and os.path.exists(path):
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+
 # Optional Yandex Music OAuth token (config services.ym.token, else .secrets/ym_token.txt).
 YM_TOKEN = str(_cfg("services.ym.token", None, "")).strip()
 if not YM_TOKEN:
@@ -462,13 +485,16 @@ class MusicBot(TeamTalk5.TeamTalk):
             "--print", "%(title)s\t%(url)s",
             "--extractor-args", "youtube:po_token_provider=bgutil:http",
         ]
-        if COOKIES:
-            cmd += ["--cookies", COOKIES]
+        ck = _fresh_cookies()
+        if ck:
+            cmd += ["--cookies", ck]
         cmd += ["--", "ytsearch10:" + query]
         try:
             rc, out, err = self._run_ydl(cmd, timeout=90)
         except subprocess.TimeoutExpired:
             return []
+        finally:
+            _drop_cookies(ck)
         if rc != 0:
             log("yt search err: %s" % (err or out or "")[-200:])
             return []
@@ -502,13 +528,16 @@ class MusicBot(TeamTalk5.TeamTalk):
             "--print", "%(title)s\t%(url)s",
             "--extractor-args", "youtube:po_token_provider=bgutil:http",
         ]
-        if COOKIES:
-            cmd += ["--cookies", COOKIES]
+        ck = _fresh_cookies()
+        if ck:
+            cmd += ["--cookies", ck]
         cmd += ["--", url]
         try:
             rc, out, err = self._run_ydl(cmd, timeout=120)
         except subprocess.TimeoutExpired:
             return []
+        finally:
+            _drop_cookies(ck)
         if rc != 0:
             log("yt playlist err: %s" % (err or out or "")[-200:])
             return []
@@ -644,11 +673,14 @@ class MusicBot(TeamTalk5.TeamTalk):
                     "-o", out + ".%(ext)s",
                     "--print", "%(title)s",
                 ]
-                ck = RUTUBE_COOKIES if "rutube.ru" in real_url else COOKIES
+                ck = _fresh_cookies(RUTUBE_COOKIES if "rutube.ru" in real_url else COOKIES)
                 if ck:
                     cmd += ["--cookies", ck]
                 cmd += ["--", real_url]
-                rc, stdout, stderr = self._run_ydl(cmd, timeout=600)
+                try:
+                    rc, stdout, stderr = self._run_ydl(cmd, timeout=600)
+                finally:
+                    _drop_cookies(ck)
                 mp3 = out + ".mp3"
                 if rc != 0 or not os.path.exists(mp3):
                     err_text = (stderr or stdout or "yt-dlp failed").strip()
