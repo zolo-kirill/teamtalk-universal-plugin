@@ -497,32 +497,44 @@ class MusicBot(TeamTalk5.TeamTalk):
         stream_id = int(time.time() * 1000) & 0xFFFF
         finished = False
         buf = b""
+        block_dur = VOICE_CHUNK / float(VOICE_RATE)  # 0.02 s per 20 ms block
+        next_slot = time.monotonic()
         try:
             while not self.voice_stop.is_set():
-                r, _, _ = select.select([proc.stdout], [], [], 0.1)
-                if not r:
-                    continue
-                data = proc.stdout.read(VOICE_CHUNK_BYTES)
-                if not data:
-                    finished = True
-                    break
-                buf += data
-                while len(buf) >= VOICE_CHUNK_BYTES:
-                    chunk = buf[:VOICE_CHUNK_BYTES]
-                    buf = buf[VOICE_CHUNK_BYTES:]
-                    raw = (ctypes.c_char * VOICE_CHUNK_BYTES).from_buffer_copy(chunk)
-                    ab = TeamTalk5.AudioBlock()
-                    ab.nStreamID = stream_id
-                    ab.nSampleRate = VOICE_RATE
-                    ab.nChannels = 1
-                    ab.lpRawAudio = ctypes.cast(raw, ctypes.c_void_p)
-                    ab.nSamples = VOICE_CHUNK
-                    ab.uStreamTypes = StreamType.STREAMTYPE_VOICE
-                    try:
-                        self.insertAudioBlock(ab)
-                    except Exception as e:
-                        log("insertAudioBlock err: %s" % e)
-                    time.sleep(0.020)  # pace: 20 ms block per 20 ms
+                # Feed blocks on a strict 20 ms schedule. A fixed sleep after
+                # each insert drifts (read + insert take time) and stutters;
+                # sleeping to the exact next slot keeps the stream smooth.
+                if len(buf) < VOICE_CHUNK_BYTES:
+                    r, _, _ = select.select([proc.stdout], [], [], 0.1)
+                    if not r:
+                        continue
+                    data = proc.stdout.read(VOICE_CHUNK_BYTES)
+                    if not data:
+                        finished = True
+                        break
+                    buf += data
+                    if len(buf) < VOICE_CHUNK_BYTES:
+                        continue  # partial read: wait for a full block
+                next_slot += block_dur
+                delay = next_slot - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                else:
+                    next_slot = time.monotonic()  # behind: don't compound backlog
+                chunk = buf[:VOICE_CHUNK_BYTES]
+                buf = buf[VOICE_CHUNK_BYTES:]
+                raw = (ctypes.c_char * VOICE_CHUNK_BYTES).from_buffer_copy(chunk)
+                ab = TeamTalk5.AudioBlock()
+                ab.nStreamID = stream_id
+                ab.nSampleRate = VOICE_RATE
+                ab.nChannels = 1
+                ab.lpRawAudio = ctypes.cast(raw, ctypes.c_void_p)
+                ab.nSamples = VOICE_CHUNK
+                ab.uStreamTypes = StreamType.STREAMTYPE_VOICE
+                try:
+                    self.insertAudioBlock(ab)
+                except Exception as e:
+                    log("insertAudioBlock err: %s" % e)
         except Exception as e:
             log("voice worker err: %s" % e)
         finally:
