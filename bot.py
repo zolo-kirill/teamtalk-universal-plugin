@@ -1342,7 +1342,9 @@ class MusicBot(TeamTalk5.TeamTalk):
         # --- играть: п <запрос>, пи <запрос>, play <запрос>, /play <запрос|ссылка> ---
         m = re.match(r"^(?:п|p|пи|pi|play|плей|играй|найди)\s+(\S.*)$", low)
         if m or cmd.startswith("play"):
-            query = m.group(1) if m else (text.split(None, 1)[1] if " " in text else None)
+            # аргумент берём из оригинального text (не lower), чтобы не портить регистр URL
+            parts = text.split(None, 1)
+            query = parts[1].strip() if len(parts) > 1 else None
             if not query:
                 self._send("Дай ссылку или запрос: п <запрос>, /play <ссылка>.")
                 return
@@ -1356,7 +1358,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         # --- играть по прямой ссылке независимо от сервиса: u <url> / ссылка <url> / link <url> ---
         m = re.match(r"^(?:u|ссылка|link|url)\s+(\S.*)$", low)
         if m:
-            u = URL_RE.search(m.group(1))
+            parts = text.split(None, 1)
+            u = URL_RE.search(parts[1]) if len(parts) > 1 else None
             if not u:
                 self._send("Дай ссылку: u https://…")
                 return
