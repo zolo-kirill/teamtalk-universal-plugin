@@ -134,6 +134,9 @@ URL_RE = re.compile(r"https?://\S+", re.I)
 # FFMpeg/yt-dlp resolve via PATH
 YTDLP = sys.executable and [sys.executable, "-m", "yt_dlp"]
 
+# Max tracks taken from a YouTube playlist into the queue
+PLAYLIST_LIMIT = 100
+
 # Voice transmission: raw PCM fed to TT_InsertAudioBlock as STREAMTYPE_VOICE.
 VOICE_RATE = 48000  # Hz
 VOICE_CHUNK = 960   # samples per block (20 ms at 48 kHz)
@@ -463,6 +466,93 @@ class MusicBot(TeamTalk5.TeamTalk):
             if len(items) >= 10:
                 break
         return items
+
+    def _is_yt_playlist_url(self, url):
+        low = url.lower()
+        if "youtube.com" not in low and "youtu.be" not in low:
+            return False
+        return bool(re.search(r"(^|[/?&])list=", url)) or "/playlist" in low
+
+    def _yt_playlist_items(self, url, limit=PLAYLIST_LIMIT):
+        """Return list of (video_url, title) for a YouTube playlist (no download)."""
+        cmd = list(YTDLP) + [
+            "--flat-playlist",
+            "--playlist-items", "1-%d" % limit,
+            "--no-warnings",
+            "--print", "%(title)s\t%(url)s",
+            "--extractor-args", "youtube:po_token_provider=bgutil:http",
+        ]
+        if COOKIES:
+            cmd += ["--cookies", COOKIES]
+        cmd += ["--", url]
+        try:
+            rc, out, err = self._run_ydl(cmd, timeout=120)
+        except subprocess.TimeoutExpired:
+            return []
+        if rc != 0:
+            log("yt playlist err: %s" % (err or out or "")[-200:])
+            return []
+        items = []
+        for ln in (out or "").splitlines():
+            parts = ln.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            t, u = parts[0].strip(), parts[1].strip()
+            if re.search(r"youtube\.com/watch\?v=|youtu\.be/", u):
+                items.append((u, t or u))
+            if len(items) >= limit:
+                break
+        return items
+
+    def _is_ym_playlist_url(self, url):
+        return bool(re.search(r"music\.yandex\.[^/]+/users/[^/]+/playlists/\d+", url))
+
+    def _ym_playlist_items(self, url, limit=PLAYLIST_LIMIT):
+        """Return list of (ymtrack:<id>, label) for a Yandex Music playlist."""
+        if not YM_TOKEN:
+            return []
+        m = re.search(r"music\.yandex\.[^/]+/users/([^/]+)/playlists/(\d+)", url)
+        if not m:
+            return []
+        owner, kind = m.group(1), m.group(2)
+        try:
+            from yandex_music import Client
+            client = Client(YM_TOKEN).init()
+            pl = client.users_playlists(kind=int(kind), user_id=owner)
+            if not pl:
+                return []
+            items = []
+            for ts in (pl.fetch_tracks() or []):
+                tr = ts.track if ts else None
+                if not tr or not tr.id:
+                    continue
+                label = " - ".join(a.name for a in (tr.artists or [])) + " - " + tr.title
+                items.append(("ymtrack:%s" % tr.id, label))
+                if len(items) >= limit:
+                    break
+            return items
+        except Exception as e:
+            log("ym playlist err: %s" % e)
+            return []
+
+    def _playlist_worker(self, url):
+        try:
+            if self._is_ym_playlist_url(url):
+                items = self._ym_playlist_items(url)
+            else:
+                items = self._yt_playlist_items(url)
+            self.api_q.put(("playlist_done", url, items))
+        except Exception as e:
+            log("playlist worker err: %s" % e)
+            self.api_q.put(("playlist_done", url, []))
+
+    def _handle_url(self, url, label):
+        """Play a direct link; a YouTube/Yandex playlist queues all its tracks."""
+        if self._is_yt_playlist_url(url) or self._is_ym_playlist_url(url):
+            self._send("📃 Плейлист: собираю треки…")
+            threading.Thread(target=self._playlist_worker, args=(url,), daemon=True).start()
+            return
+        self._switch_to(url, label)
 
     def _download_worker(self, url, title):
         real_url = url
@@ -1055,7 +1145,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return
             u = URL_RE.search(query)
             if u:
-                self._switch_to(u.group(0), u.group(0))
+                self._handle_url(u.group(0), u.group(0))
             else:
                 self._do_search(query)
             return
@@ -1067,7 +1157,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             if not u:
                 self._send("Дай ссылку: u https://…")
                 return
-            self._switch_to(u.group(0), u.group(0))
+            self._handle_url(u.group(0), u.group(0))
             return
 
         # --- bare ссылка ---
@@ -1276,6 +1366,31 @@ class MusicBot(TeamTalk5.TeamTalk):
                         lines.append("%d. %s" % (i, it["title"][:60]))
                     self._send("\n".join(lines))
                     self._play_search_index(0)
+                elif kind == "playlist_done":
+                    _, url, items = item
+                    if not items:
+                        self._send("⚠ Не удалось получить плейлист: %s" % url)
+                        return
+                    self.auto_list = False
+                    self.queue = items[:]
+                    self.downloading.clear()
+                    self._stop_voice()
+                    self.playing = False
+                    self.paused = False
+                    self.current = None
+                    self.current_orig = None
+                    self.cur_offset_ms = 0
+                    self.voice_offset_base = 0
+                    self.voice_started_at = 0
+                    self._set_status("")
+                    lines = ["📃 Плейлист (%d):" % len(items)]
+                    for i, (u, t) in enumerate(items[:5], 1):
+                        lines.append("%d. %s" % (i, t[:50]))
+                    if len(items) > 5:
+                        lines.append("… и ещё %d треков" % (len(items) - 5))
+                    lines.append("скип — дальше, с — стоп")
+                    self._send("\n".join(lines))
+                    self._enqueue_next()
                 elif kind == "advance":
                     self._advance()
                 elif kind == "voice_finished":
