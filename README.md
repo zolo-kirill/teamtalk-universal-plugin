@@ -37,6 +37,8 @@
 
 `config.json` лежит в папке бота и в git не попадает. Бот читает `config.json`, затем переменные окружения, затем значения по умолчанию.
 
+Установщик `install.sh` при установке спрашивает Telegram-настройки и пишет их в `.secrets/.env` рядом с ботом: `TG_TOKEN` — токен бота-реле, `TG_OWNER_USER_ID` — твой Telegram ID (только он управляет ботом в Telegram), `TG_NOTIFY_CHAT_ID` — чат для уведомлений о входе/выходе пользователей. Аналогичные поля в `config.json` — `telegram_relay.token`, `telegram_relay.owner_user_id`, `telegram_relay.notify_chat_id`.
+
 **YouTube-куки.** Полный экспорт кук (Netscape-формат) положи в `yt_cookies.txt` в папке бота и укажи путь в `services.yt.cookiefile_path`. Бот на каждый поиск/скачивание даёт yt-dlp свежую копию этого файла — мастер-файл не портится (yt-dlp иначе перезаписывает куки и вычищает авторизацию).
 
 Дополнительные переменные окружения: `YT_JS_RUNTIME` — путь к deno (по умолчанию `~/.local/bin/deno`); `YT_PO_TOKEN_EXTRACTOR` — extractor-args для po-токенов, пустое значение отключает (нужно, если нет bgutil-сервера).
