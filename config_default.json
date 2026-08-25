@@ -46,7 +46,8 @@
     },
     "telegram_relay": {
         "enabled": false,
-        "token": ""
+        "token": "",
+        "owner_user_id": 0
     },
     "logger": {
         "log": true,

@@ -106,6 +106,7 @@ CHANNEL_MSG_FILE = os.path.join(BASE_DIR, ".channel_msg")
 FAVORITES_FILE = os.path.join(BASE_DIR, "favorites.json")
 
 TG_TOKEN = str(_cfg("telegram_relay.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
+TG_OWNER_USER_ID = int(_cfg("telegram_relay.owner_user_id", "TG_OWNER_USER_ID", 0) or 0)  # only this user can send commands
 
 # Optional YouTube cookies to bypass bot-check on restricted videos.
 COOKIES = _cfg("services.yt.cookiefile_path", "TEAMTALK_COOKIES", None) or os.path.join(
@@ -259,8 +260,9 @@ class MusicBot(TeamTalk5.TeamTalk):
         # reply targeting: PM to the command author, optionally mirrored to channel
         self.reply_user_id = 0  # who sent the last command → PM replies
         self.channel_msg = self._load_channel_msg()  # mirror replies to channel (cm)
-        # optional Telegram relay: an own bot that forwards files into the channel
+        # optional Telegram relay: an own bot that forwards files and commands into the channel
         self._tg_offset = 0
+        self._tg_reply_chat = None  # set while handling a Telegram command → mirror replies
         if TG_TOKEN:
             threading.Thread(target=self._tg_poll, daemon=True, name="tg-poll").start()
             log("telegram relay enabled")
@@ -359,9 +361,33 @@ class MusicBot(TeamTalk5.TeamTalk):
                 log("tg poll err: %s" % str(e)[:150])
                 time.sleep(5)
 
+    def _tg_allowed(self, msg):
+        """Only the configured owner may send commands (empty = allow anyone)."""
+        if not TG_OWNER_USER_ID:
+            return True
+        uid = (msg.get("from") or {}).get("id")
+        cid = (msg.get("chat") or {}).get("id")
+        return uid == TG_OWNER_USER_ID or cid == TG_OWNER_USER_ID
+
     def _tg_handle_update(self, upd):
         msg = upd.get("message") or upd.get("channel_post")
         if not msg:
+            return
+        text = (msg.get("text") or "").strip()
+        if text:
+            # treat text as a bot command; mirror replies back to this chat
+            if not self._tg_allowed(msg):
+                return
+            prev = self.reply_user_id
+            self.reply_user_id = 0
+            self._tg_reply_chat = (msg.get("chat") or {}).get("id")
+            try:
+                self._handle_cmd(text, 0)
+            except Exception as e:
+                log("tg cmd err: %s" % e)
+            finally:
+                self.reply_user_id = prev
+                self._tg_reply_chat = None
             return
         media = msg.get("voice") or msg.get("audio") or msg.get("video") or msg.get("document")
         if not media:
@@ -422,6 +448,11 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("_send(%r) pm=%s chan=%s" % (text, sent_pm, to_channel and self.my_channel_id > 0))
         except Exception as e:
             log("send error: %s" % e)
+        if self._tg_reply_chat:
+            try:
+                self._tg_api("sendMessage", chat_id=self._tg_reply_chat, text=text[:4000])
+            except Exception as e:
+                log("tg send err: %s" % str(e)[:120])
 
     def _enqueue_next(self):
         """Start next queue item from main thread."""
@@ -1150,7 +1181,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             lines = ["Избранное:"]
             for i, it in enumerate(self.favorites, 1):
                 lines.append("%d. %s" % (i, it["label"]))
-            lines.append("f <номер> — играть, f + <ссылка> — добавить")
+            lines.append("f <номер> — играть, f + <ссылка> — добавить, f - <номер> — удалить")
             self._send("\n".join(lines))
             return
         if arg == "+":
@@ -1178,6 +1209,19 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._save_favorites()
             self._send("⭐ Добавлено в избранное: %s" % key)
             return
+        if arg == "-" or arg.startswith("- "):
+            num = arg[1:].strip()
+            if not num.isdigit():
+                self._send("Формат удаления: f - <номер>, напр. f - 1.")
+                return
+            idx = int(num) - 1
+            if idx < 0 or idx >= len(self.favorites):
+                self._send("Нет записи под номером %d (всего %d)." % (idx + 1, len(self.favorites)))
+                return
+            it = self.favorites.pop(idx)
+            self._save_favorites()
+            self._send("🗑 Удалено из избранного: %s" % it["label"])
+            return
         if arg.isdigit():
             idx = int(arg) - 1
             if idx < 0 or idx >= len(self.favorites):
@@ -1189,7 +1233,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             else:
                 self._switch_to(it["key"], it["label"])
             return
-        self._send("Команды: f — список, f + — добавить текущий, f + <ссылка> — добавить, f <номер> — играть")
+        self._send("Команды: f — список, f + — добавить текущий, f + <ссылка> — добавить, f <номер> — играть, f - <номер> — удалить")
 
     # ----- radio stations (m3u playlists) -----
     def _load_radio(self):
