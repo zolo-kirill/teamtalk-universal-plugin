@@ -398,6 +398,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             if low in ("/help", "/команды", "help", "помощь", "команды"):
                 self._tg_handle_help(msg)
                 return
+            if low in ("/online", "online", "онлайн"):
+                self._tg_send_text((msg.get("chat") or {}).get("id"), self._online_text())
+                return
             # treat text as a bot command; mirror replies back to this chat
             if not self._tg_allowed(msg):
                 return
@@ -480,7 +483,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "sv yt / sv ym — сервис\n"
             "cm — отвечать в канал/личку\n"
             "cn <ник> — ник бота\n"
-            "очередь, статус, помощь\n"
+            "очередь, статус, онлайн — кто сейчас на сервере\n"
             "sub — ссылка на подписку (команда работает в TeamTalk)\n"
             "Управляет ботом владелец."
         )
@@ -495,6 +498,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             {"command": "start", "description": "Подписка по ссылке / старт"},
             {"command": "unsub", "description": "Отписаться от уведомлений"},
             {"command": "play", "description": "Поиск и игра: /play <запрос>"},
+            {"command": "online", "description": "Кто сейчас на сервере"},
             {"command": "next", "description": "Следующий трек"},
             {"command": "prev", "description": "Предыдущий трек"},
             {"command": "volume", "description": "Громкость: /volume <1-100>"},
@@ -1531,6 +1535,10 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._status_cmd()
             return
 
+        if cmd in ("online", "онлайн"):
+            self._send(self._online_text())
+            return
+
         if cmd in ("помощь", "help", "h", "команды", "commands"):
             self._help_cmd()
             return
@@ -1684,6 +1692,21 @@ class MusicBot(TeamTalk5.TeamTalk):
         lines.append("Отправь h — справка по командам.")
         self._send("\n".join(lines))
 
+    def _online_text(self):
+        """Кто сейчас на сервере (nickname/username, без самого бота)."""
+        users = []
+        for uid, u in list(self.users.items()):
+            if uid == self.my_user_id:
+                continue
+            nick = self._tt_field(u, "szNickname") or self._tt_field(u, "szUsername")
+            if nick:
+                users.append(nick)
+        users = sorted(set(users))
+        server = self._server_name()
+        if not users:
+            return "Сейчас на сервере «%s» никого, кроме меня." % server
+        return "Сейчас на сервере «%s» (%d):\n%s" % (server, len(users), ", ".join(users))
+
     def _help_cmd(self):
         self._send(
             "п <запрос> — поиск (покажет список), играет №1\n"
@@ -1700,7 +1723,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "cn <ник> — сменить ник бота\n"
             "lf <путь> — играть локальный файл\n"
             "rs — перезапустить бота\n"
-            "очередь, статус, помощь\n"
+            "очередь, статус, онлайн — кто сейчас на сервере, помощь\n"
             "/channel <путь> — сменить канал"
         )
 
