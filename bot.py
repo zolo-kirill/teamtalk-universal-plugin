@@ -105,7 +105,6 @@ os.makedirs(INBOX_DIR, exist_ok=True)
 NICKNAME_FILE = os.path.join(BASE_DIR, ".nickname")
 CHANNEL_MSG_FILE = os.path.join(BASE_DIR, ".channel_msg")
 VOICE_ANNOUNCE_FILE = os.path.join(BASE_DIR, ".voice_announce")
-DL_DIR = os.path.join(BASE_DIR, "downloads")  # куда dl кладёт копию играющего трека
 FAVORITES_FILE = os.path.join(BASE_DIR, "favorites.json")
 SUBS_FILE = os.path.join(BASE_DIR, "subs.json")
 SUB_TTL_SEC = 86400  # сколько живёт ссылка-подписка (24 ч)
@@ -297,6 +296,10 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.channel_msg = self._load_channel_msg()  # mirror replies to channel (cm)
         self.voice_announce = self._load_voice_announce()  # voice-announce track titles (vo)
         self._announce_pending = None  # (path, offset) of real track waiting behind a title announcement
+        # dl: upload current track to the channel as a server file (TT_DoSendFile)
+        self._dl_cmd_id = None  # command id of the active upload (from TT_DoSendFile)
+        self._dl_remote = None  # remote file name
+        self._dl_local = None  # temp local copy to remove after upload
         # optional Telegram relay: an own bot that forwards files and commands into the channel
         self._tg_offset = 0
         self._tg_reply_chat = None  # set while handling a Telegram command → mirror replies
@@ -1948,37 +1951,43 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._status_cmd()
             return
 
-        # --- сохранить играющий трек файлом на сервере: dl / скачать / download ---
+        # --- загрузить играющий трек файлом в канал (сервер TeamTalk): dl / скачать / download ---
         if cmd in ("dl", "скачать", "download"):
             if not self.playing or not self.current_file:
                 self._send("Сейчас ничего не играет — скачивать нечего.")
+                return
+            if self._dl_cmd_id is not None:
+                self._send("Файл уже загружается — подожди.")
                 return
             path = self.current_file
             if not os.path.isfile(path):
                 self._send("Файл трека недоступен (это, вероятно, радио).")
                 return
-            try:
-                os.makedirs(DL_DIR, exist_ok=True)
-            except Exception as e:
-                log("dl makedirs err: %s" % str(e)[:120])
-                self._send("Не могу создать папку для скачивания: %s" % str(e)[:100])
-                return
             title = (self.current or ("", "трек"))[1] or "трек"
             ext = os.path.splitext(path)[1] or ".mp3"
             safe = re.sub(r'[\\/:*?"<>|\s]+', "_", title).strip("_")[:80] or "track"
-            fname = safe + ext
-            dest = os.path.join(DL_DIR, fname)
-            i = 1
-            while os.path.exists(dest):
-                dest = os.path.join(DL_DIR, "%s_%d%s" % (safe, i, ext))
-                i += 1
+            # TT_DoSendFile кладёт файл на сервер под именем basename локального файла —
+            # делаем копию с нормальным именем, чтобы в канале был читаемый файл
+            tmp = os.path.join(CACHE_DIR, "upload_%d_%s%s" % (int(time.time() * 1000), safe, ext))
             try:
-                shutil.copy2(path, dest)
+                shutil.copy2(path, tmp)
             except Exception as e:
                 log("dl copy err: %s" % str(e)[:150])
-                self._send("Ошибка сохранения: %s" % str(e)[:120])
+                self._send("Ошибка: не могу подготовить файл (%s)" % str(e)[:100])
                 return
-            self._send("✅ Файл сохранён на сервере: %s" % dest)
+            cid = self.my_channel_id or 1
+            cmd_id = TeamTalk5._DoSendFile(self._tt, cid, _b(tmp))
+            if cmd_id < 0:
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+                self._send("⚠ Не удалось начать загрузку в канал.")
+                return
+            self._dl_cmd_id = cmd_id
+            self._dl_remote = os.path.basename(tmp)
+            self._dl_local = tmp
+            self._send("📤 Загружаю «%s» в канал…" % self._dl_remote)
             return
 
         if cmd in ("помощь", "help", "h", "команды", "commands"):
@@ -2164,7 +2173,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "sv yt / sv ym — сервис\n"
             "cn <ник> — сменить ник бота\n"
             "lf <путь> — играть локальный файл\n"
-            "dl — сохранить играющий трек файлом на сервере\n"
+            "dl — загрузить играющий трек файлом в канал\n"
             "vo — озвучка названий треков вкл/выкл\n"
             "rs — перезапустить бота\n"
             "очередь, статус, помощь\n"
@@ -2567,14 +2576,33 @@ class MusicBot(TeamTalk5.TeamTalk):
             pass
         self._notify_join_leave("-", user)
 
+    def _dl_finish(self, ok, detail=""):
+        if self._dl_local:
+            try:
+                os.remove(self._dl_local)
+            except Exception:
+                pass
+            self._dl_local = None
+        name = self._dl_remote or "трек"
+        self._dl_cmd_id = None
+        self._dl_remote = None
+        if ok:
+            self._send("✅ Файл «%s» загружен в канал — можно скачать в TeamTalk." % name)
+        else:
+            self._send("⚠ Не удалось загрузить файл в канал: %s" % (detail or "неизвестная ошибка"))
+
     def onCmdSuccess(self, cmdId):
-        pass
+        if self._dl_cmd_id is not None and cmdId == self._dl_cmd_id:
+            self._dl_finish(True)
 
     def onCmdError(self, cmdId, errmsg):
         msg = errmsg.szErrorMsg if errmsg else ""
         if isinstance(msg, bytes):
             msg = msg.decode("utf-8", "ignore")
         log("cmd error (cmd %d): %s" % (cmdId, msg))
+        if self._dl_cmd_id is not None and cmdId == self._dl_cmd_id:
+            self._dl_finish(False, msg)
+            return
         now = time.time()
         if now - self._last_err_sent > 5:
             self._last_err_sent = now
