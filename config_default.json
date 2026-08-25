@@ -49,7 +49,7 @@
         "token": "",
         "owner_user_id": 0,
         "notify_chat_id": 0,
-        "notify_server_name": "тёплый свет",
+        "notify_server_name": "",
         "ignore_users": []
     },
     "logger": {
