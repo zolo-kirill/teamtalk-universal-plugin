@@ -103,6 +103,7 @@ os.makedirs(INBOX_DIR, exist_ok=True)
 
 NICKNAME_FILE = os.path.join(BASE_DIR, ".nickname")
 CHANNEL_MSG_FILE = os.path.join(BASE_DIR, ".channel_msg")
+FAVORITES_FILE = os.path.join(BASE_DIR, "favorites.json")
 
 TG_TOKEN = str(_cfg("telegram_relay.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
 
@@ -215,6 +216,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.queue = []  # list of (url, title)
         self.current = None  # (url, title)
         self.current_file = None
+        self.cur_source = None  # (key, label, is_radio) — what's playing now, for favorites
+        self.favorites = self._load_favorites()  # list of {"key","label","radio"}
         self.playing = False
         self.downloading = set()
         self.reconnect = True
@@ -937,6 +940,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.current_orig = path
         self.current_file = path
         self.current = (url, title)
+        self.cur_source = (url, title, False)
         self.playing = True
         self.paused = False
         self.cur_offset_ms = 0
@@ -956,6 +960,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.paused = False
         self.current = None
         self.current_orig = None
+        self.cur_source = None
         self.cur_offset_ms = 0
         self._play_file(path, title, path)
 
@@ -1026,6 +1031,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.paused = False
         self.current = None
         self.current_orig = None
+        self.cur_source = None
         self.cur_offset_ms = 0
         self._set_status("")
         self._enqueue_url(key, label)
@@ -1095,6 +1101,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.paused = False
         self.current = None
         self.current_orig = None
+        self.cur_source = None
         self.cur_offset_ms = 0
         self.voice_offset_base = 0
         self.voice_started_at = 0
@@ -1116,6 +1123,73 @@ class MusicBot(TeamTalk5.TeamTalk):
             self.auto_list = False
             self.auto_playlist = False
             self._send("⏹ Конец списка." if ended else "⏹ Очередь пуста.")
+
+    # ----- favorites (избранное) -----
+    def _load_favorites(self):
+        """Load favorites from favorites.json; survives restarts."""
+        try:
+            with open(FAVORITES_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            return [i for i in data.get("items", []) if i.get("key")]
+        except Exception:
+            return []
+
+    def _save_favorites(self):
+        try:
+            with open(FAVORITES_FILE, "w", encoding="utf-8") as f:
+                json.dump({"items": self.favorites}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log("fav save err: %s" % e)
+
+    def _fav_cmd(self, arg):
+        """Favorites: f — list, f + — add current track, f + <url> — add a link, f <n> — play."""
+        if not arg:
+            if not self.favorites:
+                self._send("Избранное пусто. Добавь: f + (текущий трек) или f + <ссылка>.")
+                return
+            lines = ["Избранное:"]
+            for i, it in enumerate(self.favorites, 1):
+                lines.append("%d. %s" % (i, it["label"]))
+            lines.append("f <номер> — играть, f + <ссылка> — добавить")
+            self._send("\n".join(lines))
+            return
+        if arg == "+":
+            if not self.cur_source:
+                self._send("Сейчас ничего не играет. Добавь ссылку: f + <ссылка>.")
+                return
+            key, label, is_radio = self.cur_source
+            if any(it["key"] == key for it in self.favorites):
+                self._send("Уже в избранном: %s" % label)
+                return
+            self.favorites.append({"key": key, "label": label, "radio": is_radio})
+            self._save_favorites()
+            self._send("⭐ Добавлено в избранное: %s" % label)
+            return
+        if arg.startswith("+ "):
+            u = URL_RE.search(arg[2:])
+            if not u:
+                self._send("Дай ссылку: f + https://…")
+                return
+            key = self._normalize_ym_url(u.group(0))
+            if any(it["key"] == key for it in self.favorites):
+                self._send("Уже в избранном: %s" % key)
+                return
+            self.favorites.append({"key": key, "label": key, "radio": False})
+            self._save_favorites()
+            self._send("⭐ Добавлено в избранное: %s" % key)
+            return
+        if arg.isdigit():
+            idx = int(arg) - 1
+            if idx < 0 or idx >= len(self.favorites):
+                self._send("Нет записи под номером %d (всего %d)." % (idx + 1, len(self.favorites)))
+                return
+            it = self.favorites[idx]
+            if it.get("radio"):
+                self._play_radio(it["key"], it["label"])
+            else:
+                self._switch_to(it["key"], it["label"])
+            return
+        self._send("Команды: f — список, f + — добавить текущий, f + <ссылка> — добавить, f <номер> — играть")
 
     # ----- radio stations (m3u playlists) -----
     def _load_radio(self):
@@ -1199,6 +1273,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.paused = False
         self.current = None
         self.current_orig = None
+        self.cur_source = (url, title, True)
         self.cur_offset_ms = 0
         self._send("📻 ▶ %s" % title)
         self._set_status("Radio: %s" % title)
@@ -1355,6 +1430,12 @@ class MusicBot(TeamTalk5.TeamTalk):
         if cmd.startswith("радио") or cmd.startswith("radio") or cmd == "r":
             arg = text.split(None, 1)[1].strip() if " " in text else ""
             self._radio_cmd(arg)
+            return
+
+        # --- избранное: f / f + / f + <ссылка> / f <номер> ---
+        if cmd == "f" or cmd.startswith("f "):
+            arg = text.split(None, 1)[1].strip() if " " in text else ""
+            self._fav_cmd(arg)
             return
 
         # --- play: bare «пи»/«play» = продолжить, если пауза ---
