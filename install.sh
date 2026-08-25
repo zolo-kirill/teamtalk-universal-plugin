@@ -142,6 +142,7 @@ do_install() {
     ask TG_NOTIFY_CHAT_ID "ID чата для уведомлений о входе/выходе, пусто = пропустить" ""
     ask YT_COOKIES "Путь к cookies.txt для YouTube (пусто = пропустить)" ""
     ask RT_COOKIES "Путь к rutube_cookies.txt (пусто = пропустить)" ""
+    ask TG_MUSIC_TOKEN "Токен Telegram-бота для музыки, по желанию (пусто = пропустить)" ""
 
     say ""
     say "  Проверьте введённые данные:"
@@ -231,6 +232,9 @@ do_install() {
             fi
             if [ -n "$TG_NOTIFY_CHAT_ID" ]; then
                 say "TG_NOTIFY_CHAT_ID=$(q "$TG_NOTIFY_CHAT_ID")"
+            fi
+            if [ -n "$TG_MUSIC_TOKEN" ]; then
+                say "TG_MUSIC_TOKEN=$(q "$TG_MUSIC_TOKEN")"
             fi
         } > "$ENV_FILE"
         say "  Конфиг записан: $ENV_FILE"
