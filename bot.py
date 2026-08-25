@@ -109,6 +109,8 @@ SUBS_FILE = os.path.join(BASE_DIR, "subs.json")
 SUB_TTL_SEC = 86400  # сколько живёт ссылка-подписка (24 ч)
 ADMINS_FILE = os.path.join(BASE_DIR, "users.db")  # user id администраторов Telegram
 BANS_FILE = os.path.join(BASE_DIR, "bans.json")  # кого бот забанил через Telegram (для /unban)
+REPLIES_FILE = os.path.join(BASE_DIR, "replies.json")  # пересланные сообщения TeamTalk: tg_message_id → tt_user_id
+REPLY_TTL_SEC = 3600  # сколько можно ответить на пересланное сообщение (1 ч, как в sender-rs)
 
 TG_TOKEN = str(_cfg("telegram_relay.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
 TG_OWNER_USER_ID = int(_cfg("telegram_relay.owner_user_id", "TG_OWNER_USER_ID", 0) or 0)  # only this user can send commands
@@ -164,6 +166,28 @@ if not YM_TOKEN:
         YM_TOKEN = open(_ym_path, encoding="utf-8").read().strip()
 
 URL_RE = re.compile(r"https?://\S+", re.I)
+
+# Первое слово личного сообщения TeamTalk из этого набора = команда боту,
+# а не свободный текст. Всё прочее пересылается владельцу (двухсторонние реплики).
+TT_COMMAND_WORDS = {
+    # play / пауза / поиск
+    "п", "p", "пи", "pi", "play", "плей", "играй", "найди",
+    # помощь / статус / очередь
+    "h", "help", "помощь", "команды", "commands",
+    "статус", "status", "now", "очередь", "queue", "q",
+    # управление
+    "n", "н", "next", "b", "back", "назад",
+    "с", "s", "стоп", "останови", "stop",
+    "скип", "дальше", "след", "следующий", "skip",
+    "v", "volume", "громкость", "громко", "sf",
+    # сервисы / файлы / каналы
+    "sv", "svc", "сервис", "channel",
+    "lf", "файл", "локальный", "cn",
+    # плейлист / радио / избранное / подписка
+    "пл", "список", "плейлист", "радио", "radio", "r", "f",
+    "u", "ссылка", "link", "url", "sub", "cm",
+    "rs", "restart", "рестарт", "перезагрузка",
+}
 
 # FFMpeg/yt-dlp resolve via PATH
 YTDLP = sys.executable and [sys.executable, "-m", "yt_dlp"]
@@ -281,6 +305,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._load_subs()
         self.admins = self._load_admins()  # user id администраторов Telegram (users.db); владелец — всегда
         self.bans = self._load_bans()  # баны, выданные через Telegram (для /unban)
+        self.pending_replies = self._load_replies()  # двухсторонние реплики: tg message_id → данные пользователя
+        self._prune_replies()
         if TG_TOKEN:
             threading.Thread(target=self._tg_poll, daemon=True, name="tg-poll").start()
             threading.Thread(target=self._tg_register_commands, daemon=True, name="tg-cmds").start()
@@ -414,6 +440,18 @@ class MusicBot(TeamTalk5.TeamTalk):
             if not self._tg_allowed(msg):
                 return
             cid = (msg.get("chat") or {}).get("id")
+            # --- ответ на пересланное ЛС из TeamTalk: двухсторонние реплики ---
+            self._prune_replies()
+            rmid = str((msg.get("reply_to_message") or {}).get("message_id") or "")
+            if rmid and rmid in self.pending_replies:
+                rec = self.pending_replies[rmid]
+                if self._send_to_tt_user(rec.get("tt_user_id") or 0, text):
+                    rec["last_used_at"] = time.time()
+                    self._save_replies()
+                    self._tg_send_text(cid, "Отправил %s в TeamTalk." % (rec.get("nick") or "сообщение"))
+                else:
+                    self._tg_send_text(cid, "Не отправилось: пользователь офлайн или ЛС недоступно.")
+                return
             if low in ("/admins", "admins"):
                 self._tg_send_text(cid, self._admins_text())
                 return
@@ -2180,6 +2218,95 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception as e:
             log("bans save err: %s" % e)
 
+    # ---- двухсторонние реплики: пересланные в Telegram сообщения TeamTalk ----
+
+    def _load_replies(self):
+        """tg_message_id -> {tt_user_id, username, nick, created_at, last_used_at}."""
+        try:
+            with open(REPLIES_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            return {str(k): v for k, v in (d.get("replies") or {}).items()}
+        except Exception:
+            return {}
+
+    def _save_replies(self):
+        try:
+            with open(REPLIES_FILE, "w", encoding="utf-8") as f:
+                json.dump({"replies": self.pending_replies}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log("replies save err: %s" % e)
+
+    def _prune_replies(self):
+        """Выкидываем протухшие pending-реплики (TTL 1 час, как в sender-rs)."""
+        now = time.time()
+        drop = [mid for mid, r in list(self.pending_replies.items())
+                if now - (r.get("last_used_at") or r.get("created_at") or 0) > REPLY_TTL_SEC]
+        for mid in drop:
+            del self.pending_replies[mid]
+
+    def _forward_target(self):
+        """Куда пересылать личные сообщения TeamTalk: notify-чат владельца или его DM."""
+        if TG_NOTIFY_CHAT_ID:
+            return TG_NOTIFY_CHAT_ID
+        if TG_OWNER_USER_ID:
+            return TG_OWNER_USER_ID
+        return 0
+
+    def _tg_forward_user_msg(self, text, chat_id):
+        """Отправить сообщение в Telegram и вернуть его message_id (для pending-reply)."""
+        try:
+            res = self._tg_api("sendMessage", chat_id=chat_id, text=text[:4000])
+            return res["result"]["message_id"]
+        except Exception as e:
+            log("tg forward err: %s" % str(e)[:120])
+            return 0
+
+    def _tt_forward_private(self, from_uid, text):
+        """Переслать личное сообщение TeamTalk владельцу в Telegram и запомнить для ответа."""
+        try:
+            chat = self._forward_target()
+            if not chat:
+                return
+            u = self.users.get(from_uid)
+            nick = self._tt_field(u, "szNickname") if u else ""
+            uname = self._tt_field(u, "szUsername") if u else ""
+            who = nick or uname or "id %s" % from_uid
+            mid = self._tg_forward_user_msg("ЛС TeamTalk от %s: %s" % (who, text), chat)
+            if not mid:
+                return
+            self.pending_replies[str(mid)] = {
+                "tt_user_id": from_uid, "username": uname, "nick": nick,
+                "created_at": time.time(), "last_used_at": time.time(),
+            }
+            self._save_replies()
+            log("forwarded PM from %d -> tg msg %d" % (from_uid, mid))
+        except Exception as e:
+            log("forward private err: %s" % str(e)[:150])
+
+    def _send_to_tt_user(self, uid, text):
+        """Отправить личное сообщение конкретному пользователю TeamTalk (MSGTYPE_USER)."""
+        if not self.logged_in or not uid:
+            return False
+        try:
+            msgs = buildTextMessage(text, TextMsgType.MSGTYPE_USER, nToUserID=uid)
+            for m in msgs:
+                self.doTextMessage(m)
+            return True
+        except Exception as e:
+            log("send to tt user %d err: %s" % (uid, str(e)[:150]))
+            return False
+
+    def _is_tt_command(self, text):
+        """Свободный текст или команда боту? (первое слово / слеш / ссылка)."""
+        if not text:
+            return False
+        if text.startswith("/"):
+            return True
+        if URL_RE.search(text):
+            return True
+        first = text.split(None, 1)[0].strip().lower().rstrip(".")
+        return first in TT_COMMAND_WORDS
+
     def _tg_admin_ids(self):
         ids = set(self.admins)
         if TG_OWNER_USER_ID:
@@ -2382,6 +2509,11 @@ class MusicBot(TeamTalk5.TeamTalk):
             if not msg:
                 return
             log("msg from %d: %s" % (textmessage.nFromUserID, msg))
+            # личное сообщение не-команда → пересылаем владельцу (двухсторонние реплики)
+            if (int(getattr(textmessage, "nMsgType", 0) or 0) == TextMsgType.MSGTYPE_USER
+                    and not self._is_tt_command(msg)):
+                self._tt_forward_private(textmessage.nFromUserID, msg)
+                return
             self._handle_cmd(msg, textmessage.nFromUserID)
         except Exception as e:
             log("handle msg error: %s" % e)
