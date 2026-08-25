@@ -87,7 +87,8 @@ do_install() {
     local REPO_DIR="$SCRIPT_DIR" SECRETS_DIR="" git_url="$REPO_URL_DEFAULT"
     local TEAMTALK_HOST="" TEAMTALK_TCP_PORT="" TEAMTALK_UDP_PORT=""
     local TEAMTALK_USERNAME="" TEAMTALK_PASSWORD="" TEAMTALK_NICKNAME=""
-    local TEAMTALK_CHANNEL="" TG_TOKEN="" YT_COOKIES="" RT_COOKIES="" YM_TOKEN_VAL=""
+    local TEAMTALK_CHANNEL="" TG_TOKEN="" TG_OWNER_USER_ID="" TG_NOTIFY_CHAT_ID=""
+    local YT_COOKIES="" RT_COOKIES="" YM_TOKEN_VAL=""
     local CONFIRM="" START_NOW=""
 
     say ""
@@ -136,6 +137,8 @@ do_install() {
     ask TEAMTALK_CHANNEL "Channel (empty = root channel)" ""
     ask YM_TOKEN_VAL "Yandex Music OAuth token (empty = skip)" ""
     ask TG_TOKEN "Telegram bot token for the relay (empty = skip)" ""
+    ask TG_OWNER_USER_ID "Your Telegram user ID (owner — can control the bot there, empty = skip)" ""
+    ask TG_NOTIFY_CHAT_ID "Telegram chat ID for join/leave notifications (empty = skip)" ""
     ask YT_COOKIES "Path to cookies.txt for YouTube (empty = skip)" ""
     ask RT_COOKIES "Path to rutube_cookies.txt (empty = skip)" ""
 
@@ -149,6 +152,12 @@ do_install() {
         say "    Channel:   (root channel)"
     fi
     say "    Password:  ***"
+    if [ -n "$TG_OWNER_USER_ID" ]; then
+        say "    TG owner:  $TG_OWNER_USER_ID"
+    fi
+    if [ -n "$TG_NOTIFY_CHAT_ID" ]; then
+        say "    TG notify: $TG_NOTIFY_CHAT_ID"
+    fi
     ask_yn CONFIRM "Everything correct? Proceed with the install" y
     if [ "$CONFIRM" != "y" ]; then
         say "  Install aborted."
@@ -215,6 +224,12 @@ do_install() {
             fi
             if [ -n "$TG_TOKEN" ]; then
                 say "TG_TOKEN=$(q "$TG_TOKEN")"
+            fi
+            if [ -n "$TG_OWNER_USER_ID" ]; then
+                say "TG_OWNER_USER_ID=$(q "$TG_OWNER_USER_ID")"
+            fi
+            if [ -n "$TG_NOTIFY_CHAT_ID" ]; then
+                say "TG_NOTIFY_CHAT_ID=$(q "$TG_NOTIFY_CHAT_ID")"
             fi
         } > "$ENV_FILE"
         say "  Config written: $ENV_FILE"
