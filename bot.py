@@ -112,6 +112,8 @@ ADMINS_FILE = os.path.join(BASE_DIR, "users.db")  # user id администра
 BANS_FILE = os.path.join(BASE_DIR, "bans.json")  # кого бот забанил через Telegram (для /unban)
 REPLIES_FILE = os.path.join(BASE_DIR, "replies.json")  # пересланные сообщения TeamTalk: tg_message_id → tt_user_id
 REPLY_TTL_SEC = 3600  # сколько можно ответить на пересланное сообщение (1 ч, как в sender-rs)
+MUSIC_SUBS_FILE = os.path.join(BASE_DIR, "music_subs.json")  # подписчики на музыку в Telegram
+MUSIC_SUB_TTL_SEC = 86400  # сколько живёт ссылка подписки на музыку (24 ч)
 
 TG_TOKEN = str(_cfg("telegram_relay.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
 TG_OWNER_USER_ID = int(_cfg("telegram_relay.owner_user_id", "TG_OWNER_USER_ID", 0) or 0)  # only this user can send commands
@@ -119,6 +121,10 @@ TG_NOTIFY_CHAT_ID = int(_cfg("telegram_relay.notify_chat_id", "TG_NOTIFY_CHAT_ID
 TG_NOTIFY_SERVER = str(_cfg("telegram_relay.notify_server_name", "TG_NOTIFY_SERVER_NAME", "")).strip()  # пусто = брать имя сервера из TeamTalk
 TG_NOTIFY_IGNORE = {u.strip().lower() for u in (_cfg("telegram_relay.ignore_users", None, []) or []) if u.strip()}
 TG_NOTIFY_IGNORE.add("bot_admin")  # все боты на одной админ-учётке — их не анонсируем
+
+# Отдельный Telegram-бот для музыки: подписчики (sub mus) получают играющие треки.
+# Пусто — музыкальный бот не подключён (sub mus отвечает, что не настроен).
+TG_MUSIC_TOKEN = str(_cfg("telegram_relay.music_token", "TG_MUSIC_TOKEN", "")).strip()
 
 # Optional YouTube cookies to bypass bot-check on restricted videos.
 COOKIES = _cfg("services.yt.cookiefile_path", "TEAMTALK_COOKIES", None) or os.path.join(
@@ -167,28 +173,6 @@ if not YM_TOKEN:
         YM_TOKEN = open(_ym_path, encoding="utf-8").read().strip()
 
 URL_RE = re.compile(r"https?://\S+", re.I)
-
-# Первое слово личного сообщения TeamTalk из этого набора = команда боту,
-# а не свободный текст. Всё прочее пересылается владельцу (двухсторонние реплики).
-TT_COMMAND_WORDS = {
-    # play / пауза / поиск
-    "п", "p", "пи", "pi", "play", "плей", "играй", "найди",
-    # помощь / статус / очередь
-    "h", "help", "помощь", "команды", "commands",
-    "статус", "status", "now", "очередь", "queue", "q",
-    # управление
-    "n", "н", "next", "b", "back", "назад",
-    "с", "s", "стоп", "останови", "stop",
-    "скип", "дальше", "след", "следующий", "skip",
-    "v", "volume", "громкость", "громко", "sf",
-    # сервисы / файлы / каналы
-    "sv", "svc", "сервис", "channel",
-    "lf", "файл", "локальный", "cn",
-    # плейлист / радио / избранное / подписка
-    "пл", "список", "плейлист", "радио", "radio", "r", "f",
-    "u", "ссылка", "link", "url", "sub", "cm",
-    "rs", "restart", "рестарт", "перезагрузка",
-}
 
 # FFMpeg/yt-dlp resolve via PATH
 YTDLP = sys.executable and [sys.executable, "-m", "yt_dlp"]
@@ -310,6 +294,12 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.sub_pending = {}  # token -> {nick, username, nUserID, created}
         self.sub_active = {}  # chat_id(str) -> {nick, username, nUserID, subscribed_at}
         self._load_subs()
+        # подписка на музыку: отдельный Telegram-бот, присылает играющие треки (sub mus)
+        self.mus_pending = {}  # token -> {nick, username, nUserID, created}
+        self.music_subs = {}  # chat_id(str) -> {nick, username, nUserID, subscribed_at}
+        self._load_music_subs()
+        self._music_username = None  # username музыкального бота (getMe, кэш)
+        self._music_offset = 0
         self.admins = self._load_admins()  # user id администраторов Telegram (users.db); владелец — всегда
         self.bans = self._load_bans()  # баны, выданные через Telegram (для /unban)
         self.pending_replies = self._load_replies()  # двухсторонние реплики: tg message_id → данные пользователя
@@ -318,6 +308,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             threading.Thread(target=self._tg_poll, daemon=True, name="tg-poll").start()
             threading.Thread(target=self._tg_register_commands, daemon=True, name="tg-cmds").start()
             log("telegram relay enabled")
+        if TG_MUSIC_TOKEN:
+            threading.Thread(target=self._music_poll, daemon=True, name="music-poll").start()
+            log("music telegram bot enabled")
 
     def _load_channel_msg(self):
         try:
@@ -425,6 +418,154 @@ class MusicBot(TeamTalk5.TeamTalk):
             except Exception as e:
                 log("tg poll err: %s" % str(e)[:150])
                 time.sleep(5)
+
+    # ---- музыкальный Telegram-бот: подписка sub mus, раздача треков ----
+
+    def _music_api(self, method, **params):
+        url = "https://api.telegram.org/bot%s/%s" % (TG_MUSIC_TOKEN, method)
+        data = urllib.parse.urlencode(params).encode()
+        req = urllib.request.Request(url, data=data, method="POST")
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read().decode())
+
+    def _music_bot_username(self):
+        if self._music_username:
+            return self._music_username
+        try:
+            res = self._music_api("getMe")
+            u = ((res or {}).get("result") or {}).get("username")
+            if u:
+                self._music_username = u
+        except Exception as e:
+            log("music getMe err: %s" % str(e)[:100])
+        return self._music_username
+
+    def _music_send_text(self, chat_id, text):
+        try:
+            self._music_api("sendMessage", chat_id=chat_id, text=text[:4000])
+        except Exception as e:
+            log("music send err: %s" % str(e)[:120])
+
+    def _music_send_document(self, chat_id, path, caption="", fname=None):
+        """Отправить файл подписчику музыки. multipart собирается вручную — в venv нет requests."""
+        try:
+            boundary = "----BotBoundary" + uuid.uuid4().hex
+            fname = fname or os.path.basename(path)
+            with open(path, "rb") as f:
+                fdata = f.read()
+            def _part(name, value):
+                return ("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n"
+                        % (boundary, name, value)).encode("utf-8")
+            body = (
+                _part("chat_id", str(chat_id))
+                + _part("caption", caption)
+                + ("--%s\r\nContent-Disposition: form-data; name=\"document\"; filename=\"%s\"\r\n"
+                   "Content-Type: application/octet-stream\r\n\r\n" % (boundary, fname)).encode("utf-8")
+                + fdata
+                + ("\r\n--%s--\r\n" % boundary).encode("utf-8")
+            )
+            url = "https://api.telegram.org/bot%s/sendDocument" % TG_MUSIC_TOKEN
+            req = urllib.request.Request(url, data=body, method="POST")
+            req.add_header("Content-Type", "multipart/form-data; boundary=%s" % boundary)
+            with urllib.request.urlopen(req, timeout=180) as r:
+                return json.loads(r.read().decode())
+        except Exception as e:
+            log("music send doc err: %s" % str(e)[:150])
+            return None
+
+    def _music_poll(self):
+        while True:
+            try:
+                res = self._music_api("getUpdates", timeout=25, offset=self._music_offset)
+                for upd in res.get("result", []):
+                    self._music_offset = upd.get("update_id", 0) + 1
+                    self._music_handle_update(upd)
+            except Exception as e:
+                log("music poll err: %s" % str(e)[:150])
+                time.sleep(5)
+
+    def _music_handle_update(self, upd):
+        msg = upd.get("message")
+        if not msg:
+            return
+        cid = str((msg.get("chat") or {}).get("id") or "")
+        if not cid:
+            return
+        text = (msg.get("text") or "").strip()
+        low = text.lower()
+        if low in ("/unsub_mus", "/unsub", "/stop", "отписаться"):
+            if cid in self.music_subs:
+                del self.music_subs[cid]
+                self._save_music_subs()
+                self._music_send_text(int(cid), "Отписался от музыки.")
+            else:
+                self._music_send_text(int(cid), "Ты и так не подписан на музыку.")
+            return
+        # /start sub_mus_<token> — активация подписки по ссылке
+        token = text[len("/start "):].strip() if low.startswith("/start ") else ""
+        if token.startswith("sub_mus_"):
+            rec = self.mus_pending.pop(token, None)
+            self._save_music_subs()
+            if not rec:
+                self._music_send_text(int(cid), "Ссылка недействительна или истекла. Отправь sub mus заново в TeamTalk.")
+                return
+            rec["subscribed_at"] = time.time()
+            self.music_subs[cid] = rec
+            self._save_music_subs()
+            who = rec.get("nick") or rec.get("username") or "твой аккаунт"
+            self._music_send_text(int(cid), "✅ Подписан на музыку (%s). Каждый сыгранный трек буду присылать сюда. Отписаться — /unsub_mus." % who)
+            return
+        if cid in self.music_subs:
+            self._music_send_text(int(cid), "Ты подписан на музыку. Треки приходят сюда. Отписаться — /unsub_mus.")
+        else:
+            self._music_send_text(int(cid), "Это бот для подписки на музыку. На сервере TeamTalk отправь боту личное сообщение «sub mus» — получишь ссылку на подписку.")
+
+    def _music_broadcast(self, path, title):
+        """Разослать играющий трек всем подписчикам музыки (в фоне, не блокируя музыку)."""
+        if not TG_MUSIC_TOKEN or not self.music_subs:
+            return
+        if not path or not os.path.isfile(path):
+            return  # радио и треки без локального файла не шлём
+        title = title or "трек"
+        ext = os.path.splitext(path)[1] or ".mp3"
+        safe = re.sub(r'[\\/:*?"<>|\s]+', "_", title).strip("_")[:80] or "track"
+        fname = safe + ext
+        subs = list(self.music_subs.keys())
+
+        def _worker():
+            for cid in subs:
+                try:
+                    self._music_send_document(int(cid), path, title[:100], fname)
+                except Exception as e:
+                    log("music broadcast err: %s" % str(e)[:120])
+        threading.Thread(target=_worker, daemon=True, name="music-broadcast").start()
+
+    def _load_music_subs(self):
+        try:
+            with open(MUSIC_SUBS_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            now = time.time()
+            self.mus_pending = {
+                t: p for t, p in (d.get("pending") or {}).items()
+                if p.get("created", 0) > now - MUSIC_SUB_TTL_SEC
+            }
+            self.music_subs = {str(c): s for c, s in (d.get("active") or {}).items()}
+        except Exception:
+            self.mus_pending = {}
+            self.music_subs = {}
+
+    def _save_music_subs(self):
+        try:
+            now = time.time()
+            self.mus_pending = {
+                t: p for t, p in self.mus_pending.items()
+                if p.get("created", 0) > now - MUSIC_SUB_TTL_SEC
+            }
+            with open(MUSIC_SUBS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"pending": self.mus_pending, "active": self.music_subs},
+                          f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log("music subs save err: %s" % e)
 
     def _tg_allowed(self, msg):
         """Владелец из конфига и админы из users.db могут слать команды."""
@@ -832,6 +973,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "cn <ник> — ник бота\n"
             "очередь, статус, онлайн — кто сейчас на сервере\n"
             "sub — ссылка на подписку (команда работает в TeamTalk)\n"
+            "sub mus — подписка на музыку в Telegram (команда работает в TeamTalk)\n"
             "Музыку заказывает любой, управление ботом — только админам."
         )
         if is_admin:
@@ -1483,6 +1625,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._start_voice(ann, 0)
                 return
         self._start_voice(path, 0)
+        self._music_broadcast(path, title)  # раздать трек подписчикам музыки (в фоне)
 
     def _play_local(self, path, title):
         """Play a local file (no download) — used for files sent via Telegram."""
@@ -1857,9 +2000,13 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._seek(int(m.group(1)))
             return
 
-        # --- подписка на уведомления: sub / /sub (в TeamTalk — личное сообщение) ---
+        # --- подписка на уведомления: sub / /sub; подписка на музыку: sub mus ---
         if cmd == "sub" or cmd.startswith("sub "):
-            self._sub_cmd()
+            rest = text[len("sub"):].strip().lower()
+            if rest in ("mus", "music", "музыка", "муз"):
+                self._sub_music_cmd()
+            else:
+                self._sub_cmd()
             return
 
         # --- сообщения в канал: cm — вкл/выкл (по умолчанию ответы в личку) ---
@@ -2160,23 +2307,26 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _help_cmd(self):
         self._send(
-            "п <запрос> — поиск (покажет список), играет №1\n"
-            "n — следующий, b — предыдущий (по списку или плейлисту)\n"
-            "пл <страница> — полный список плейлиста постранично\n"
-            "пи — play, п — пауза\n"
-            "с — стоп, скип — дальше (очередь)\n"
-            "sf <секунды> — перемотка (sf -5 — назад)\n"
-            "u <url> / ссылка <url> — играть по ссылке (независимо от сервиса)\n"
-            "радио — список станций (радио <номер> — запуск)\n"
-            "v <1-100> — громкость (мгновенно)\n"
-            "cm — сообщения в канал вкл/выкл (по умолчанию ответы в личку)\n"
-            "sv yt / sv ym — сервис\n"
-            "cn <ник> — сменить ник бота\n"
-            "lf <путь> — играть локальный файл\n"
-            "dl — загрузить играющий трек файлом в канал\n"
-            "vo — озвучка названий треков вкл/выкл\n"
-            "rs — перезапустить бота\n"
-            "очередь, статус, помощь\n"
+            "Команды — со слэшем. Всё остальное бот пересылает в Telegram.\n"
+            "/п <запрос> — поиск (покажет список), играет №1\n"
+            "/n — следующий, /b — предыдущий (по списку или плейлисту)\n"
+            "/пл <страница> — полный список плейлиста постранично\n"
+            "/пи — play, /п — пауза\n"
+            "/с — стоп, /скип — дальше (очередь)\n"
+            "/sf <секунды> — перемотка (/sf -5 — назад)\n"
+            "/u <url> — играть по ссылке (независимо от сервиса)\n"
+            "/радио — список станций (/радио <номер> — запуск)\n"
+            "/v <1-100> — громкость (мгновенно)\n"
+            "/cm — сообщения в канал вкл/выкл (по умолчанию ответы в личку)\n"
+            "/sv yt / sv ym — сервис\n"
+            "/cn <ник> — сменить ник бота\n"
+            "/lf <путь> — играть локальный файл\n"
+            "/dl — загрузить играющий трек файлом в канал\n"
+            "/vo — озвучка названий треков вкл/выкл\n"
+            "/sub mus — подписка на музыку в Telegram\n"
+            "/sub — уведомления о входе/выходе\n"
+            "/rs — перезапустить бота\n"
+            "/очередь, /статус, /h — справка\n"
             "/channel <путь> — сменить канал"
         )
 
@@ -2337,13 +2487,14 @@ class MusicBot(TeamTalk5.TeamTalk):
         for mid in drop:
             del self.pending_replies[mid]
 
-    def _forward_target(self):
-        """Куда пересылать личные сообщения TeamTalk: notify-чат владельца или его DM."""
+    def _forward_recipients(self):
+        """Куда пересылать сообщения из TeamTalk: notify-чат владельца + лички всех админов."""
+        chats = set()
         if TG_NOTIFY_CHAT_ID:
-            return TG_NOTIFY_CHAT_ID
-        if TG_OWNER_USER_ID:
-            return TG_OWNER_USER_ID
-        return 0
+            chats.add(int(TG_NOTIFY_CHAT_ID))
+        for uid in self._tg_admin_ids():
+            chats.add(int(uid))
+        return chats
 
     def _tg_forward_user_msg(self, text, chat_id):
         """Отправить сообщение в Telegram и вернуть его message_id (для pending-reply)."""
@@ -2355,26 +2506,41 @@ class MusicBot(TeamTalk5.TeamTalk):
             return 0
 
     def _tt_forward_private(self, from_uid, text):
-        """Переслать личное сообщение TeamTalk владельцу в Telegram и запомнить для ответа."""
+        """Переслать личное сообщение TeamTalk админам в Telegram и запомнить для ответа."""
         try:
-            chat = self._forward_target()
-            if not chat:
-                return
             u = self.users.get(from_uid)
             nick = self._tt_field(u, "szNickname") if u else ""
             uname = self._tt_field(u, "szUsername") if u else ""
             who = nick or uname or "id %s" % from_uid
-            mid = self._tg_forward_user_msg("ЛС TeamTalk от %s: %s" % (who, text), chat)
-            if not mid:
-                return
-            self.pending_replies[str(mid)] = {
-                "tt_user_id": from_uid, "username": uname, "nick": nick,
-                "created_at": time.time(), "last_used_at": time.time(),
-            }
+            body = "ЛС TeamTalk от %s: %s" % (who, text)
+            for chat in self._forward_recipients():
+                mid = self._tg_forward_user_msg(body, chat)
+                if not mid:
+                    continue
+                self.pending_replies[str(mid)] = {
+                    "tt_user_id": from_uid, "username": uname, "nick": nick,
+                    "created_at": time.time(), "last_used_at": time.time(),
+                }
+                log("forwarded PM from %d -> tg msg %d" % (from_uid, mid))
             self._save_replies()
-            log("forwarded PM from %d -> tg msg %d" % (from_uid, mid))
         except Exception as e:
             log("forward private err: %s" % str(e)[:150])
+
+    def _tt_forward_channel(self, from_uid, text):
+        """Переслать сообщение из канала TeamTalk админам в Telegram (без ответа-реплики)."""
+        try:
+            u = self.users.get(from_uid)
+            nick = self._tt_field(u, "szNickname") if u else ""
+            uname = self._tt_field(u, "szUsername") if u else ""
+            ident = (nick or uname or "").strip().lower()
+            if ident in TG_NOTIFY_IGNORE:
+                return  # свои боты на той же учётке — не эхом
+            who = nick or uname or "id %s" % from_uid
+            body = "Канал TeamTalk, %s: %s" % (who, text)
+            for chat in self._forward_recipients():
+                self._tg_forward_user_msg(body, chat)
+        except Exception as e:
+            log("forward channel err: %s" % str(e)[:150])
 
     def _send_to_tt_user(self, uid, text):
         """Отправить личное сообщение конкретному пользователю TeamTalk (MSGTYPE_USER)."""
@@ -2390,15 +2556,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             return False
 
     def _is_tt_command(self, text):
-        """Свободный текст или команда боту? (первое слово / слеш / ссылка)."""
-        if not text:
-            return False
-        if text.startswith("/"):
-            return True
-        if URL_RE.search(text):
-            return True
-        first = text.split(None, 1)[0].strip().lower().rstrip(".")
-        return first in TT_COMMAND_WORDS
+        """Команда боту только со слэшем: /play, /sub, ... Всё остальное — сообщение
+        (пересылается в Telegram)."""
+        return bool(text and text.startswith("/"))
 
     def _tg_admin_ids(self):
         ids = set(self.admins)
@@ -2520,6 +2680,36 @@ class MusicBot(TeamTalk5.TeamTalk):
         finally:
             self.channel_msg = was
 
+    def _sub_music_cmd(self):
+        """sub mus в TeamTalk: ссылка на подписку на музыку (через отдельный музыкальный бот)."""
+        if not TG_MUSIC_TOKEN or not self.logged_in:
+            self._send("Музыкальный бот не настроен.")
+            return
+        if not self.reply_user_id:
+            self._send("Отправь sub mus личным сообщением боту.")
+            return
+        username = self._music_bot_username()
+        if not username:
+            self._send("Музыкальный бот недоступен.")
+            return
+        user = self.users.get(self.reply_user_id)
+        nick = self._tt_field(user, "szNickname") if user else ""
+        uname = self._tt_field(user, "szUsername") if user else ""
+        token = "sub_mus_%s" % secrets.token_hex(8)
+        self.mus_pending[token] = {
+            "nick": nick, "username": uname,
+            "nUserID": self.reply_user_id, "created": time.time(),
+        }
+        self._save_music_subs()
+        link = "https://t.me/%s?start=%s" % (username, token)
+        # ссылку — только в личку, не зеркалим в канал (чтобы токен не утёк)
+        was = self.channel_msg
+        self.channel_msg = False
+        try:
+            self._send("Подписка на музыку: треки будут приходить в Telegram. Открой ссылку:\n%s" % link)
+        finally:
+            self.channel_msg = was
+
     def _server_name(self):
         if TG_NOTIFY_SERVER:
             return TG_NOTIFY_SERVER
@@ -2621,10 +2811,13 @@ class MusicBot(TeamTalk5.TeamTalk):
             if not msg:
                 return
             log("msg from %d: %s" % (textmessage.nFromUserID, msg))
-            # личное сообщение не-команда → пересылаем владельцу (двухсторонние реплики)
-            if (int(getattr(textmessage, "nMsgType", 0) or 0) == TextMsgType.MSGTYPE_USER
-                    and not self._is_tt_command(msg)):
-                self._tt_forward_private(textmessage.nFromUserID, msg)
+            # команды — только со слэшем (/sub, /play, ...); любое другое сообщение
+            # пересылаем в Telegram: личку — с возможностью ответить, канал — просто релеем
+            if not self._is_tt_command(msg):
+                if int(getattr(textmessage, "nMsgType", 0) or 0) == TextMsgType.MSGTYPE_USER:
+                    self._tt_forward_private(textmessage.nFromUserID, msg)
+                else:
+                    self._tt_forward_channel(textmessage.nFromUserID, msg)
                 return
             self._handle_cmd(msg, textmessage.nFromUserID)
         except Exception as e:

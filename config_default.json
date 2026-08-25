@@ -50,7 +50,8 @@
         "owner_user_id": 0,
         "notify_chat_id": 0,
         "notify_server_name": "",
-        "ignore_users": []
+        "ignore_users": [],
+        "music_token": ""
     },
     "logger": {
         "log": true,
