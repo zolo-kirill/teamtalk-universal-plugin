@@ -85,12 +85,7 @@ bash install.sh
 
 Установщик создаёт `.venv` с yt-dlp и yandex-music, проверяет SDK, создаёт шаблон `.secrets/.env`, ставит пользовательский systemd-сервис `teamtalk-universal-plugin` с автозапуском. Бот работает под твоим пользователем (не root), sudo нужен только для установки системных пакетов.
 
-Или вручную:
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install --upgrade yt-dlp yandex-music
-```
+Полная ручная установка без скрипта — в разделе «Ручная установка (без скрипта)» ниже.
 
 ### 5. Настрой `config.json`
 
@@ -108,6 +103,127 @@ bash run.sh
 systemctl --user status teamtalk-universal-plugin    # статус
 journalctl --user -u teamtalk-universal-plugin -f    # логи
 ```
+
+## Ручная установка (без скрипта)
+
+Не хочешь пользоваться `install.sh` — поставь всё руками. Каждый шаг ниже самодостаточен, с нуля.
+
+### 1. Системные пакеты
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git ffmpeg python3 python3-pip python3-venv
+```
+
+### 2. Клонирование
+
+```bash
+git clone https://github.com/zolo-kirill/teamtalk-universal-plugin.git
+cd teamtalk-universal-plugin
+```
+
+### 3. Проверка SDK
+
+```bash
+ls sdk/tt5sdk*/Library/TeamTalk_DLL/libTeamTalk5.so
+```
+
+SDK входит в репозиторий. Если файла нет — репозиторий склонирован не полностью, бот не запустится.
+
+### 4. Окружение Python
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip yt-dlp yandex-music
+```
+
+### 5. Секреты
+
+Создай папку секретов рядом с репозиторием (на уровень выше) и файл `.env`:
+
+```bash
+mkdir -p ../.secrets
+```
+
+Файл `../.secrets/.env`:
+
+```ini
+TEAMTALK_HOST=адрес_сервера
+TEAMTALK_TCP_PORT=10333
+TEAMTALK_UDP_PORT=10333
+TEAMTALK_USERNAME=логин
+TEAMTALK_PASSWORD=пароль
+TEAMTALK_NICKNAME=MusicBot
+TEAMTALK_CHANNEL=
+TG_TOKEN=токен_телеграм_бота
+TG_OWNER_USER_ID=твой_telegram_id
+TG_NOTIFY_CHAT_ID=id_чата_для_уведомлений
+```
+
+Разбор переменных:
+
+- `TEAMTALK_HOST`, `TEAMTALK_TCP_PORT`, `TEAMTALK_UDP_PORT`, `TEAMTALK_USERNAME`, `TEAMTALK_PASSWORD` — адрес сервера, порты и учётка для входа.
+- `TEAMTALK_NICKNAME` — как бота видно в канале.
+- `TEAMTALK_CHANNEL` — название канала; пусто — корневой канал.
+- `TG_TOKEN` — токен Telegram-бота для реле (взять у @BotFather). Пусто — реле выключено.
+- `TG_OWNER_USER_ID` — твой Telegram ID: только этот пользователь управляет ботом в Telegram. Узнать свой ID можно у @userinfobot.
+- `TG_NOTIFY_CHAT_ID` — куда слать уведомления о входе/выходе пользователей (пусто — выключено).
+
+Токен Яндекс.Музыки положи одной строкой в `../.secrets/ym_token.txt`. Куки YouTube (Netscape-формат) — в `../.secrets/cookies.txt` и укажи путь к ним в `config.json` → `services.yt.cookiefile_path`.
+
+### 6. Конфиг
+
+```bash
+cp config_default.json config.json
+```
+
+Бот читает `config.json` в первую очередь, затем переменные окружения из `.secrets/.env`, затем значения по умолчанию. Минимально достаточно переменных из `.env`; `config.json` нужен, если хочешь менять громкость, подключаемые сервисы или пути к кукам.
+
+### 7. Запуск
+
+```bash
+bash run.sh
+```
+
+`run.sh` сам подхватит SDK, venv и `.secrets/.env`. Первый запуск в фоне:
+
+```bash
+nohup bash run.sh > bot.log 2>&1 &
+```
+
+### 8. Автозапуск через systemd
+
+```bash
+mkdir -p ~/.config/systemd/user
+```
+
+Файл `~/.config/systemd/user/teamtalk-universal-plugin.service`:
+
+```ini
+[Unit]
+Description=TeamTalk Universal Plugin
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/путь/к/teamtalk-universal-plugin
+ExecStart=/bin/bash /путь/к/teamtalk-universal-plugin/run.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
+
+Запусти и включи автозапуск:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now teamtalk-universal-plugin
+loginctl enable-linger $(id -un)   # сервис переживёт перезагрузку
+```
+
+Логи: `journalctl --user -u teamtalk-universal-plugin -f`.
 
 ## Файлы
 
