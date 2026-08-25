@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import select
 import shutil
 import subprocess
@@ -104,6 +105,8 @@ os.makedirs(INBOX_DIR, exist_ok=True)
 NICKNAME_FILE = os.path.join(BASE_DIR, ".nickname")
 CHANNEL_MSG_FILE = os.path.join(BASE_DIR, ".channel_msg")
 FAVORITES_FILE = os.path.join(BASE_DIR, "favorites.json")
+SUBS_FILE = os.path.join(BASE_DIR, "subs.json")
+SUB_TTL_SEC = 86400  # сколько живёт ссылка-подписка (24 ч)
 
 TG_TOKEN = str(_cfg("telegram_relay.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
 TG_OWNER_USER_ID = int(_cfg("telegram_relay.owner_user_id", "TG_OWNER_USER_ID", 0) or 0)  # only this user can send commands
@@ -268,8 +271,15 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._tg_offset = 0
         self._tg_reply_chat = None  # set while handling a Telegram command → mirror replies
         self._ready_time = None  # when the bot finished joining — for join/leave notify grace
+        # подписки на уведомления: /sub в TeamTalk → ссылка → активация в Telegram
+        self.users = {}  # nUserID -> User (кто сейчас на сервере)
+        self._tg_username = None  # bot username from getMe, для /sub-ссылок
+        self.sub_pending = {}  # token -> {nick, username, nUserID, created}
+        self.sub_active = {}  # chat_id(str) -> {nick, username, nUserID, subscribed_at}
+        self._load_subs()
         if TG_TOKEN:
             threading.Thread(target=self._tg_poll, daemon=True, name="tg-poll").start()
+            threading.Thread(target=self._tg_register_commands, daemon=True, name="tg-cmds").start()
             log("telegram relay enabled")
 
     def _load_channel_msg(self):
@@ -380,6 +390,14 @@ class MusicBot(TeamTalk5.TeamTalk):
             return
         text = (msg.get("text") or "").strip()
         if text:
+            low = text.lower()
+            # подписка по deep-link: любой пользователь, не только владелец
+            if low.startswith("/start") or low == "/unsub":
+                self._tg_handle_sub_msg(msg, text)
+                return
+            if low in ("/help", "/команды", "help", "помощь", "команды"):
+                self._tg_handle_help(msg)
+                return
             # treat text as a bot command; mirror replies back to this chat
             if not self._tg_allowed(msg):
                 return
@@ -409,6 +427,85 @@ class MusicBot(TeamTalk5.TeamTalk):
         path = self._tg_download(file_id)
         if path:
             self.api_q.put(("local_file", path, title[:80]))
+
+    def _tg_send_text(self, chat_id, text):
+        try:
+            self._tg_api("sendMessage", chat_id=chat_id, text=text[:4000])
+        except Exception as e:
+            log("tg send err: %s" % str(e)[:120])
+
+    def _tg_handle_sub_msg(self, msg, text):
+        """/start (по deep-link sub_<token>) и /unsub — для подписчиков, не только владельца."""
+        cid = (msg.get("chat") or {}).get("id")
+        if not cid:
+            return
+        low = text.lower()
+        if low == "/unsub":
+            if str(cid) in self.sub_active:
+                del self.sub_active[str(cid)]
+                self._save_subs()
+                self._tg_send_text(cid, "Отписался от уведомлений о входе/выходе.")
+            else:
+                self._tg_send_text(cid, "Ты и так не подписан.")
+            return
+        # /start или /start sub_<token>
+        token = text[len("/start "):].strip() if low.startswith("/start ") else ""
+        if not token.startswith("sub_"):
+            self._tg_send_text(cid, "Я музыкант и оповещатель TeamTalk. На сервере отправь боту /sub — получишь ссылку на подписку.")
+            return
+        rec = self.sub_pending.pop(token, None)
+        self._save_subs()
+        if not rec:
+            self._tg_send_text(cid, "Ссылка недействительна или истекла. Отправь /sub заново на сервере.")
+            return
+        rec["subscribed_at"] = time.time()
+        self.sub_active[str(cid)] = rec
+        self._save_subs()
+        who = rec.get("nick") or rec.get("username") or "твой аккаунт"
+        self._tg_send_text(cid, "✅ Подписка активна (%s): будешь получать уведомления о входе/выходе на сервере «%s». Отписаться — /unsub." % (who, self._server_name()))
+
+    def _tg_help_text(self):
+        return (
+            "Команды бота:\n"
+            "п <запрос> / пи <запрос> — поиск и игра (YouTube / Яндекс.Музыка)\n"
+            "n — следующий, b — предыдущий\n"
+            "п / пи — пауза / продолжить\n"
+            "с / стоп — стоп, скип / дальше — дальше\n"
+            "u <ссылка> — играть по ссылке\n"
+            "v <1-100> — громкость\n"
+            "sf <сек> — перемотка (sf -5 — назад)\n"
+            "пл <страница> — список плейлиста\n"
+            "радио — радиостанции (радио <номер> — запуск)\n"
+            "f — избранное (f +, f + <ссылка>, f <номер>, f - <номер>)\n"
+            "sv yt / sv ym — сервис\n"
+            "cm — отвечать в канал/личку\n"
+            "cn <ник> — ник бота\n"
+            "очередь, статус, помощь\n"
+            "sub — ссылка на подписку (команда работает в TeamTalk)\n"
+            "Управляет ботом владелец."
+        )
+
+    def _tg_handle_help(self, msg):
+        self._tg_send_text((msg.get("chat") or {}).get("id"), self._tg_help_text())
+
+    def _tg_register_commands(self):
+        """Настроить меню команд бота в Telegram (видно всем, не только владельцу)."""
+        commands = [
+            {"command": "help", "description": "Список команд"},
+            {"command": "start", "description": "Подписка по ссылке / старт"},
+            {"command": "unsub", "description": "Отписаться от уведомлений"},
+            {"command": "play", "description": "Поиск и игра: /play <запрос>"},
+            {"command": "next", "description": "Следующий трек"},
+            {"command": "prev", "description": "Предыдущий трек"},
+            {"command": "volume", "description": "Громкость: /volume <1-100>"},
+            {"command": "favorites", "description": "Избранное: /favorites"},
+            {"command": "radio", "description": "Радиостанции"},
+        ]
+        try:
+            self._tg_api("setMyCommands", commands=json.dumps(commands))
+            log("tg commands registered")
+        except Exception as e:
+            log("tg setMyCommands err: %s" % str(e)[:120])
 
     def _tg_download(self, file_id):
         try:
@@ -1348,6 +1445,11 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._seek(int(m.group(1)))
             return
 
+        # --- подписка на уведомления: sub / /sub (в TeamTalk — личное сообщение) ---
+        if cmd == "sub" or cmd.startswith("sub "):
+            self._sub_cmd()
+            return
+
         # --- сообщения в канал: cm — вкл/выкл (по умолчанию ответы в личку) ---
         if cmd == "cm":
             self.channel_msg = not self.channel_msg
@@ -1579,6 +1681,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 lines.append("🔊 %d%%" % self.volume)
         else:
             lines = ["Ничего не играет."]
+        lines.append("Отправь h — справка по командам.")
         self._send("\n".join(lines))
 
     def _help_cmd(self):
@@ -1663,15 +1766,83 @@ class MusicBot(TeamTalk5.TeamTalk):
             v = v.decode("utf-8", "ignore")
         return v.replace("\x00", "").strip()
 
-    def _tg_send_notify(self, text):
+    def _tg_send_notify(self, text, chat_id):
         """Send a Telegram notification in a background thread (don't block the audio loop)."""
         def _do():
             try:
-                self._tg_api("sendMessage", chat_id=TG_NOTIFY_CHAT_ID, text=text)
-                log("tg notify: %s" % text[:80])
+                self._tg_api("sendMessage", chat_id=chat_id, text=text)
+                log("tg notify -> %s: %s" % (chat_id, text[:80]))
             except Exception as e:
                 log("tg notify err: %s" % str(e)[:120])
         threading.Thread(target=_do, daemon=True).start()
+
+    def _load_subs(self):
+        try:
+            with open(SUBS_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            now = time.time()
+            self.sub_pending = {
+                t: p for t, p in (d.get("pending") or {}).items()
+                if p.get("created", 0) > now - SUB_TTL_SEC
+            }
+            self.sub_active = {str(c): s for c, s in (d.get("active") or {}).items()}
+        except Exception:
+            self.sub_pending = {}
+            self.sub_active = {}
+
+    def _save_subs(self):
+        try:
+            now = time.time()
+            self.sub_pending = {
+                t: p for t, p in self.sub_pending.items()
+                if p.get("created", 0) > now - SUB_TTL_SEC
+            }
+            with open(SUBS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"pending": self.sub_pending, "active": self.sub_active},
+                          f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log("subs save err: %s" % e)
+
+    def _tg_bot_username(self):
+        if self._tg_username:
+            return self._tg_username
+        try:
+            res = self._tg_api("getMe")
+            u = ((res or {}).get("result") or {}).get("username")
+            if u:
+                self._tg_username = u
+        except Exception as e:
+            log("getMe err: %s" % str(e)[:100])
+        return self._tg_username
+
+    def _sub_cmd(self):
+        """/sub в TeamTalk: выдаём индивидуальную ссылку-подписку (только в личку)."""
+        if not (TG_TOKEN and self.logged_in):
+            return
+        if not self.reply_user_id:
+            self._send("Отправь /sub личным сообщением боту.")
+            return
+        username = self._tg_bot_username()
+        if not username:
+            self._send("Telegram-бот не настроен (нет токена).")
+            return
+        user = self.users.get(self.reply_user_id)
+        nick = self._tt_field(user, "szNickname") if user else ""
+        uname = self._tt_field(user, "szUsername") if user else ""
+        token = "sub_%s" % secrets.token_hex(8)
+        self.sub_pending[token] = {
+            "nick": nick, "username": uname,
+            "nUserID": self.reply_user_id, "created": time.time(),
+        }
+        self._save_subs()
+        link = "https://t.me/%s?start=%s" % (username, token)
+        # ссылку — только в личку, не зеркалим в канал (чтобы токен не утёк)
+        was = self.channel_msg
+        self.channel_msg = False
+        try:
+            self._send("Подписка на уведомления о входе/выходе. Открой ссылку в Telegram:\n%s" % link)
+        finally:
+            self.channel_msg = was
 
     def _server_name(self):
         if TG_NOTIFY_SERVER:
@@ -1687,9 +1858,9 @@ class MusicBot(TeamTalk5.TeamTalk):
         return "TeamTalk"
 
     def _notify_join_leave(self, sign, user):
-        """Announce a user logging in (+)/out (-) to the configured Telegram chat."""
+        """Announce a user logging in (+)/out (-): владельцу и всем подписчикам."""
         try:
-            if not (TG_TOKEN and TG_NOTIFY_CHAT_ID) or not user:
+            if not TG_TOKEN or not user:
                 return
             if user.nUserID == self.my_user_id:
                 return
@@ -1699,20 +1870,34 @@ class MusicBot(TeamTalk5.TeamTalk):
             nick = self._tt_field(user, "szNickname") or self._tt_field(user, "szUsername")
             if not nick:
                 return
-            if self._tt_field(user, "szUsername").lower() in TG_NOTIFY_IGNORE:
+            uname = self._tt_field(user, "szUsername").lower()
+            if uname in TG_NOTIFY_IGNORE:
                 return
             if sign == "+":
                 text = "%s присоединился к серверу %s" % (nick, self._server_name())
             else:
                 text = "%s покинул сервер %s" % (nick, self._server_name())
-            self._tg_send_notify(text)
+            if TG_NOTIFY_CHAT_ID:
+                self._tg_send_notify(text, TG_NOTIFY_CHAT_ID)
+            for cid, rec in list(self.sub_active.items()):
+                if rec.get("username") and str(rec["username"]).lower() == uname:
+                    continue  # не анонсируем подписчику его собственный вход/выход
+                self._tg_send_notify(text, int(cid))
         except Exception as e:
             log("notify join/leave err: %s" % str(e)[:150])
 
     def onCmdUserLoggedIn(self, user):
+        try:
+            self.users[user.nUserID] = user
+        except Exception:
+            pass
         self._notify_join_leave("+", user)
 
     def onCmdUserLoggedOut(self, user):
+        try:
+            self.users.pop(user.nUserID, None)
+        except Exception:
+            pass
         self._notify_join_leave("-", user)
 
     def onCmdSuccess(self, cmdId):

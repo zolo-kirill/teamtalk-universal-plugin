@@ -1,5 +1,5 @@
 [Unit]
-Description=TeamTalk Music Bot
+Description=TeamTalk Universal Plugin
 
 [Service]
 Type=simple
