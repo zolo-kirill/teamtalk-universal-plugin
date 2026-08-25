@@ -108,6 +108,7 @@ FAVORITES_FILE = os.path.join(BASE_DIR, "favorites.json")
 SUBS_FILE = os.path.join(BASE_DIR, "subs.json")
 SUB_TTL_SEC = 86400  # сколько живёт ссылка-подписка (24 ч)
 ADMINS_FILE = os.path.join(BASE_DIR, "users.db")  # user id администраторов Telegram
+BANS_FILE = os.path.join(BASE_DIR, "bans.json")  # кого бот забанил через Telegram (для /unban)
 
 TG_TOKEN = str(_cfg("telegram_relay.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
 TG_OWNER_USER_ID = int(_cfg("telegram_relay.owner_user_id", "TG_OWNER_USER_ID", 0) or 0)  # only this user can send commands
@@ -279,6 +280,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.sub_active = {}  # chat_id(str) -> {nick, username, nUserID, subscribed_at}
         self._load_subs()
         self.admins = self._load_admins()  # user id администраторов Telegram (users.db); владелец — всегда
+        self.bans = self._load_bans()  # баны, выданные через Telegram (для /unban)
         if TG_TOKEN:
             threading.Thread(target=self._tg_poll, daemon=True, name="tg-poll").start()
             threading.Thread(target=self._tg_register_commands, daemon=True, name="tg-cmds").start()
@@ -428,6 +430,18 @@ class MusicBot(TeamTalk5.TeamTalk):
             if low.startswith("/delsub ") or low == "/delsub":
                 self._tg_delsub_cmd(msg, text)
                 return
+            if low in ("/kick", "kick", "кик"):
+                text, kb = self._kick_ban_view("kick")
+                self._tg_send_kb(cid, text, kb)
+                return
+            if low in ("/ban", "ban", "бан"):
+                text, kb = self._kick_ban_view("ban")
+                self._tg_send_kb(cid, text, kb)
+                return
+            if low in ("/unban", "unban", "разбан"):
+                text, kb = self._unban_view()
+                self._tg_send_kb(cid, text, kb)
+                return
             prev = self.reply_user_id
             self.reply_user_id = 0
             self._tg_reply_chat = (msg.get("chat") or {}).get("id")
@@ -541,6 +555,47 @@ class MusicBot(TeamTalk5.TeamTalk):
         kb.append([{"text": "Назад к списку", "callback_data": "subs:list"}])
         return "\n".join(lines), kb
 
+    def _online_users_for_moderation(self):
+        """(uid, nick, username, ip) по онлайн-пользователям, кроме бота и админов."""
+        out = []
+        for uid, u in list(self.users.items()):
+            if uid == self.my_user_id:
+                continue
+            utype = int(getattr(u, "uUserType", 0) or 0)
+            if utype == 2:  # админов кикать/банить нельзя
+                continue
+            nick = self._tt_field(u, "szNickname") or self._tt_field(u, "szUsername")
+            out.append((uid, nick, self._tt_field(u, "szUsername"),
+                        self._tt_field(u, "szIPAddress")))
+        out.sort(key=lambda r: r[1].lower())
+        return out
+
+    def _kick_ban_view(self, mode):
+        """Список онлайн-пользователей с кнопками «кикнуть»/«забанить»."""
+        users = self._online_users_for_moderation()
+        verb = "кикнуть" if mode == "kick" else "забанить"
+        if not users:
+            return "На сервере сейчас некого %s — все админы или никого нет." % verb, []
+        lines = ["Кого %s? (%d на сервере)" % (verb, len(users))]
+        kb = []
+        for uid, nick, username, ip in users:
+            label = "%s (id %s)" % (nick or username or uid, uid)
+            kb.append([{"text": label, "callback_data": "%s:do:%s" % (mode, uid)}])
+        return "\n".join(lines), kb
+
+    def _unban_view(self):
+        """Список записей банов из bans.json с кнопками разбана."""
+        if not self.bans:
+            return "В базе банов пусто — ботом никто не банен.", []
+        lines = ["Забаненные (%d):" % len(self.bans)]
+        kb = []
+        for uid, rec in sorted(self.bans.items()):
+            nick = rec.get("nick") or "id %s" % uid
+            lines.append("%s (id %s)" % (nick, uid))
+            kb.append([{"text": "Разбанить: %s (id %s)" % (nick, uid),
+                        "callback_data": "unban:do:%s" % uid}])
+        return "\n".join(lines), kb
+
     def _tg_handle_callback(self, cq):
         data = cq.get("data") or ""
         qid = cq.get("id")
@@ -611,6 +666,64 @@ class MusicBot(TeamTalk5.TeamTalk):
             else:
                 self._tg_answer_cb(qid, "Не подписчик.", alert=True)
             return
+        if data.startswith("kick:do:"):
+            target = int(data.split(":", 2)[2])
+            u = self.users.get(target)
+            nick = self._tt_field(u, "szNickname") if u else "id %s" % target
+            try:
+                self.doKickUser(target, 0)
+                self._tg_answer_cb(qid, "Кикнут: %s" % nick)
+            except Exception as e:
+                log("kick err: %s" % e)
+                self._tg_answer_cb(qid, "Не удалось кикнуть.", alert=True)
+            text, kb = self._kick_ban_view("kick")
+            self._tg_edit_kb(cid, mid, text, kb)
+            return
+        if data.startswith("ban:do:"):
+            target = int(data.split(":", 2)[2])
+            u = self.users.get(target)
+            nick = self._tt_field(u, "szNickname") if u else "id %s" % target
+            ip = self._tt_field(u, "szIPAddress") if u else ""
+            try:
+                # кикаем серверно (канал 0 = весь сервер) и банем IP, чтобы не вернулся
+                self.doKickUser(target, 0)
+                if ip:
+                    self.doBanIPAddress(_b(ip), 0)
+                    self.bans[str(target)] = {
+                        "nick": nick,
+                        "username": self._tt_field(u, "szUsername") if u else "",
+                        "ip": ip,
+                        "banned_at": time.time(),
+                    }
+                    self._save_bans()
+                    self._tg_answer_cb(qid, "Забанен: %s" % nick)
+                else:
+                    self._tg_answer_cb(qid, "Кикнут: %s (IP не виден — серверный бан не выдан)" % nick)
+            except Exception as e:
+                log("ban err: %s" % e)
+                self._tg_answer_cb(qid, "Не удалось забанить.", alert=True)
+            text, kb = self._kick_ban_view("ban")
+            self._tg_edit_kb(cid, mid, text, kb)
+            return
+        if data.startswith("unban:do:"):
+            target = data.split(":", 2)[2]
+            rec = self.bans.get(target) or {}
+            nick = rec.get("nick") or "id %s" % target
+            ok = False
+            ip = rec.get("ip") or ""
+            try:
+                if ip:
+                    self.doUnBanUser(_b(ip), 0)
+                    ok = True
+            except Exception as e:
+                log("unban err: %s" % e)
+            self.bans.pop(target, None)
+            self._save_bans()
+            self._tg_answer_cb(qid,
+                "Разбанен: %s" % nick if ok else "Запись удалена (IP не было — серверный бан не снимался).")
+            text, kb = self._unban_view()
+            self._tg_edit_kb(cid, mid, text, kb)
+            return
         log("tg unknown callback: %s" % data)
 
     def _tg_handle_sub_msg(self, msg, text):
@@ -664,7 +777,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             "Музыку заказывает любой, управление ботом — только админам."
         )
         if is_admin:
-            text += "\nДля админов: /admins, /admin <id>, /unadmin <id>, /subs, /delsub <id>"
+            text += ("\nДля админов: /admins, /admin <id>, /unadmin <id>, /subs, /delsub <id>, "
+                      "/kick, /ban, /unban")
         return text
 
     def _tg_is_admin_msg(self, msg):
@@ -698,6 +812,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             {"command": "unadmin", "description": "Снять админа: /unadmin <id>"},
             {"command": "subs", "description": "Список подписчиков"},
             {"command": "delsub", "description": "Убрать подписку: /delsub <id>"},
+            {"command": "kick", "description": "Кикнуть пользователя"},
+            {"command": "ban", "description": "Забанить пользователя"},
+            {"command": "unban", "description": "Разбанить: /unban"},
         ]
         try:
             # общее меню по умолчанию — без админских команд
@@ -2046,6 +2163,22 @@ class MusicBot(TeamTalk5.TeamTalk):
                 json.dump({"admins": self.admins}, f, ensure_ascii=False, indent=2)
         except Exception as e:
             log("admins save err: %s" % e)
+
+    def _load_bans(self):
+        """Баны, выданные ботом через Telegram: userid -> {nick, ip, username, banned_at}."""
+        try:
+            with open(BANS_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            return {str(k): v for k, v in (d.get("bans") or {}).items()}
+        except Exception:
+            return {}
+
+    def _save_bans(self):
+        try:
+            with open(BANS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"bans": self.bans}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log("bans save err: %s" % e)
 
     def _tg_admin_ids(self):
         ids = set(self.admins)
