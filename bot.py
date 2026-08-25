@@ -104,6 +104,7 @@ os.makedirs(INBOX_DIR, exist_ok=True)
 
 NICKNAME_FILE = os.path.join(BASE_DIR, ".nickname")
 CHANNEL_MSG_FILE = os.path.join(BASE_DIR, ".channel_msg")
+VOICE_ANNOUNCE_FILE = os.path.join(BASE_DIR, ".voice_announce")
 FAVORITES_FILE = os.path.join(BASE_DIR, "favorites.json")
 SUBS_FILE = os.path.join(BASE_DIR, "subs.json")
 SUB_TTL_SEC = 86400  # сколько живёт ссылка-подписка (24 ч)
@@ -293,6 +294,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         # reply targeting: PM to the command author, optionally mirrored to channel
         self.reply_user_id = 0  # who sent the last command → PM replies
         self.channel_msg = self._load_channel_msg()  # mirror replies to channel (cm)
+        self.voice_announce = self._load_voice_announce()  # voice-announce track titles (vo)
+        self._announce_pending = None  # (path, offset) of real track waiting behind a title announcement
         # optional Telegram relay: an own bot that forwards files and commands into the channel
         self._tg_offset = 0
         self._tg_reply_chat = None  # set while handling a Telegram command → mirror replies
@@ -324,6 +327,19 @@ class MusicBot(TeamTalk5.TeamTalk):
                 f.write("1" if self.channel_msg else "0")
         except Exception as e:
             log("channel_msg save err: %s" % e)
+
+    def _load_voice_announce(self):
+        try:
+            return open(VOICE_ANNOUNCE_FILE).read().strip() == "1"
+        except Exception:
+            return False
+
+    def _save_voice_announce(self):
+        try:
+            with open(VOICE_ANNOUNCE_FILE, "w") as f:
+                f.write("1" if self.voice_announce else "0")
+        except Exception as e:
+            log("voice_announce save err: %s" % e)
 
     def _scale_pcm(self, chunk):
         """Apply volume with a smooth ramp toward the target (no ffmpeg restart).
@@ -1450,6 +1466,24 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception:
             pass
 
+    def _tts_announce(self, text):
+        """Синтезировать озвучку текста (Google Translate TTS) в файл. Вернуть путь или None."""
+        try:
+            url = ("https://translate.google.com/translate_tts?ie=UTF-8&tl=ru&client=tw-ob&q="
+                   + urllib.parse.quote(text))
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                data = r.read()
+            if not data:
+                return None
+            path = os.path.join(CACHE_DIR, "announce_%d.mp3" % int(time.time() * 1000))
+            with open(path, "wb") as f:
+                f.write(data)
+            return path
+        except Exception as e:
+            log("tts announce err: %s" % str(e)[:120])
+            return None
+
     def _play_file(self, url, title, path):
         self.current_orig = path
         self.current_file = path
@@ -1461,6 +1495,12 @@ class MusicBot(TeamTalk5.TeamTalk):
         if not self.silent:
             self._send("▶ Сейчас играет: %s" % title)
         self._set_status("Playing: %s" % title)
+        if self.voice_announce and title:
+            ann = self._tts_announce("Сейчас играет: %s" % title)
+            if ann:
+                self._announce_pending = (path, 0)
+                self._start_voice(ann, 0)
+                return
         self._start_voice(path, 0)
 
     def _play_local(self, path, title):
@@ -1848,6 +1888,13 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._send("Сообщения в канал: %s" % ("вкл ✅" if self.channel_msg else "выкл ⭕"))
             return
 
+        # --- озвучка названия трека: vo — вкл/выкл ---
+        if cmd == "vo":
+            self.voice_announce = not self.voice_announce
+            self._save_voice_announce()
+            self._send("Озвучка названий: %s" % ("вкл 🔊" if self.voice_announce else "выкл ⭕"))
+            return
+
         # --- перезапуск бота: rs ---
         if cmd in ("rs", "рестарт", "restart", "перезагрузка"):
             self._send("🔄 Перезапускаюсь…")
@@ -1906,6 +1953,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             self.current = None
             self.current_orig = None
             self.cur_offset_ms = 0
+            self._announce_pending = None
             self._set_status("")
             self._send("⏹ Стоп.")
             return
@@ -2134,6 +2182,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "cn <ник> — сменить ник бота\n"
             "lf <путь> — играть локальный файл\n"
             "dl — скачать играющий трек файлом в Telegram\n"
+            "vo — озвучка названий треков вкл/выкл\n"
             "rs — перезапустить бота\n"
             "очередь, статус, помощь\n"
             "/channel <путь> — сменить канал"
@@ -2666,7 +2715,12 @@ class MusicBot(TeamTalk5.TeamTalk):
                 elif kind == "advance":
                     self._advance(silent=True)
                 elif kind == "voice_finished":
-                    self._advance(silent=True)
+                    if self._announce_pending:
+                        path, offset = self._announce_pending
+                        self._announce_pending = None
+                        self._start_voice(path, offset)
+                    else:
+                        self._advance(silent=True)
                 elif kind == "voice_error":
                     _, msg = item
                     self._send("⚠ Голос: %s" % msg)
