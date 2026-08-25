@@ -1535,10 +1535,6 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._status_cmd()
             return
 
-        if cmd in ("online", "онлайн"):
-            self._send(self._online_text())
-            return
-
         if cmd in ("помощь", "help", "h", "команды", "commands"):
             self._help_cmd()
             return
@@ -1723,7 +1719,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "cn <ник> — сменить ник бота\n"
             "lf <путь> — играть локальный файл\n"
             "rs — перезапустить бота\n"
-            "очередь, статус, онлайн — кто сейчас на сервере, помощь\n"
+            "очередь, статус, помощь\n"
             "/channel <путь> — сменить канал"
         )
 
