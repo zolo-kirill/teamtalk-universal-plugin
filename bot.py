@@ -2579,6 +2579,13 @@ class MusicBot(TeamTalk5.TeamTalk):
         (пересылается в Telegram)."""
         return bool(text and text.startswith("/"))
 
+    def _is_typing_indicator(self, msg):
+        """Клиенты TeamTalk, пока пользователь набирает текст, шлют в канал текст
+        «typing\nN» — это индикатор набора, не настоящее сообщение. Его не
+        пересылаем и не обрабатываем, иначе засоряет чат в Telegram."""
+        low = msg.strip().lower()
+        return low == "typing" or low.startswith("typing\n")
+
     def _tg_admin_ids(self):
         ids = set(self.admins)
         if TG_OWNER_USER_ID:
@@ -2830,6 +2837,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             if not msg:
                 return
             log("msg from %d: %s" % (textmessage.nFromUserID, msg))
+            if self._is_typing_indicator(msg):
+                log("typing indicator from %d, skip" % textmessage.nFromUserID)
+                return
             # команды — только со слэшем (/sub, /play, ...); любое другое сообщение
             # пересылаем в Telegram: личку — с возможностью ответить, канал — просто релеем
             if not self._is_tt_command(msg):
