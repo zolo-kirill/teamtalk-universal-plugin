@@ -107,6 +107,10 @@ FAVORITES_FILE = os.path.join(BASE_DIR, "favorites.json")
 
 TG_TOKEN = str(_cfg("telegram_relay.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
 TG_OWNER_USER_ID = int(_cfg("telegram_relay.owner_user_id", "TG_OWNER_USER_ID", 0) or 0)  # only this user can send commands
+TG_NOTIFY_CHAT_ID = int(_cfg("telegram_relay.notify_chat_id", "TG_NOTIFY_CHAT_ID", 0) or 0)  # сюда слать вход/выход пользователей (0 = выкл)
+TG_NOTIFY_SERVER = str(_cfg("telegram_relay.notify_server_name", "TG_NOTIFY_SERVER_NAME", "тёплый свет")).strip() or "тёплый свет"
+TG_NOTIFY_IGNORE = {u.strip().lower() for u in (_cfg("telegram_relay.ignore_users", None, []) or []) if u.strip()}
+TG_NOTIFY_IGNORE.add("bot_admin")  # все боты на одной админ-учётке — их не анонсируем
 
 # Optional YouTube cookies to bypass bot-check on restricted videos.
 COOKIES = _cfg("services.yt.cookiefile_path", "TEAMTALK_COOKIES", None) or os.path.join(
@@ -263,6 +267,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         # optional Telegram relay: an own bot that forwards files and commands into the channel
         self._tg_offset = 0
         self._tg_reply_chat = None  # set while handling a Telegram command → mirror replies
+        self._ready_time = None  # when the bot finished joining — for join/leave notify grace
         if TG_TOKEN:
             threading.Thread(target=self._tg_poll, daemon=True, name="tg-poll").start()
             log("telegram relay enabled")
@@ -1646,9 +1651,56 @@ class MusicBot(TeamTalk5.TeamTalk):
         try:
             if user.nUserID == self.my_user_id:
                 self.my_channel_id = user.nChannelID
+                self._ready_time = time.time()
                 log("joined channel id %d" % self.my_channel_id)
         except Exception:
             pass
+
+    def _tt_field(self, user, name):
+        """Read a User struct field, decode bytes → str, strip NUL."""
+        v = getattr(user, name, "") or ""
+        if isinstance(v, bytes):
+            v = v.decode("utf-8", "ignore")
+        return v.replace("\x00", "").strip()
+
+    def _tg_send_notify(self, text):
+        """Send a Telegram notification in a background thread (don't block the audio loop)."""
+        def _do():
+            try:
+                self._tg_api("sendMessage", chat_id=TG_NOTIFY_CHAT_ID, text=text)
+                log("tg notify: %s" % text[:80])
+            except Exception as e:
+                log("tg notify err: %s" % str(e)[:120])
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _notify_join_leave(self, sign, user):
+        """Announce a user logging in (+)/out (-) to the configured Telegram chat."""
+        try:
+            if not (TG_TOKEN and TG_NOTIFY_CHAT_ID) or not user:
+                return
+            if user.nUserID == self.my_user_id:
+                return
+            # grace period: don't broadcast the initial roster replay right after connect
+            if not self._ready_time or time.time() - self._ready_time < 3:
+                return
+            nick = self._tt_field(user, "szNickname") or self._tt_field(user, "szUsername")
+            if not nick:
+                return
+            if self._tt_field(user, "szUsername").lower() in TG_NOTIFY_IGNORE:
+                return
+            if sign == "+":
+                text = "%s присоединился к серверу %s" % (nick, TG_NOTIFY_SERVER)
+            else:
+                text = "%s покинул сервер %s" % (nick, TG_NOTIFY_SERVER)
+            self._tg_send_notify(text)
+        except Exception as e:
+            log("notify join/leave err: %s" % str(e)[:150])
+
+    def onCmdUserLoggedIn(self, user):
+        self._notify_join_leave("+", user)
+
+    def onCmdUserLoggedOut(self, user):
+        self._notify_join_leave("-", user)
 
     def onCmdSuccess(self, cmdId):
         pass

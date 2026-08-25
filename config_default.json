@@ -47,7 +47,10 @@
     "telegram_relay": {
         "enabled": false,
         "token": "",
-        "owner_user_id": 0
+        "owner_user_id": 0,
+        "notify_chat_id": 0,
+        "notify_server_name": "тёплый свет",
+        "ignore_users": []
     },
     "logger": {
         "log": true,
