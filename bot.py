@@ -105,6 +105,7 @@ os.makedirs(INBOX_DIR, exist_ok=True)
 NICKNAME_FILE = os.path.join(BASE_DIR, ".nickname")
 CHANNEL_MSG_FILE = os.path.join(BASE_DIR, ".channel_msg")
 VOICE_ANNOUNCE_FILE = os.path.join(BASE_DIR, ".voice_announce")
+DL_DIR = os.path.join(BASE_DIR, "downloads")  # куда dl кладёт копию играющего трека
 FAVORITES_FILE = os.path.join(BASE_DIR, "favorites.json")
 SUBS_FILE = os.path.join(BASE_DIR, "subs.json")
 SUB_TTL_SEC = 86400  # сколько живёт ссылка-подписка (24 ч)
@@ -528,29 +529,6 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._tg_api("sendMessage", chat_id=chat_id, text=text[:4000])
         except Exception as e:
             log("tg send err: %s" % str(e)[:120])
-
-    def _tg_send_document(self, chat_id, path, caption="", fname=None):
-        """Отправить локальный файл в Telegram. multipart/form-data собирается вручную — в venv нет requests."""
-        boundary = "----BotBoundary" + uuid.uuid4().hex
-        fname = fname or os.path.basename(path)
-        with open(path, "rb") as f:
-            fdata = f.read()
-        def _part(name, value):
-            return ("--%s\r\nContent-Disposition: form-data; name=\"%s\"\r\n\r\n%s\r\n"
-                    % (boundary, name, value)).encode("utf-8")
-        body = (
-            _part("chat_id", str(chat_id))
-            + _part("caption", caption)
-            + ("--%s\r\nContent-Disposition: form-data; name=\"document\"; filename=\"%s\"\r\n"
-               "Content-Type: application/octet-stream\r\n\r\n" % (boundary, fname)).encode("utf-8")
-            + fdata
-            + ("\r\n--%s--\r\n" % boundary).encode("utf-8")
-        )
-        url = "https://api.telegram.org/bot%s/sendDocument" % TG_TOKEN
-        req = urllib.request.Request(url, data=body, method="POST")
-        req.add_header("Content-Type", "multipart/form-data; boundary=%s" % boundary)
-        with urllib.request.urlopen(req, timeout=180) as r:
-            return json.loads(r.read().decode())
 
     # ---- inline-клавиатуры: интерактивное управление подписчиками ----
 
@@ -1970,11 +1948,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._status_cmd()
             return
 
-        # --- скачать играющий трек в Telegram: dl / скачать / download ---
+        # --- сохранить играющий трек файлом на сервере: dl / скачать / download ---
         if cmd in ("dl", "скачать", "download"):
-            if not TG_TOKEN or not TG_OWNER_USER_ID:
-                self._send("Скачивание выключено: Telegram-реле не настроено.")
-                return
             if not self.playing or not self.current_file:
                 self._send("Сейчас ничего не играет — скачивать нечего.")
                 return
@@ -1982,20 +1957,28 @@ class MusicBot(TeamTalk5.TeamTalk):
             if not os.path.isfile(path):
                 self._send("Файл трека недоступен (это, вероятно, радио).")
                 return
+            try:
+                os.makedirs(DL_DIR, exist_ok=True)
+            except Exception as e:
+                log("dl makedirs err: %s" % str(e)[:120])
+                self._send("Не могу создать папку для скачивания: %s" % str(e)[:100])
+                return
             title = (self.current or ("", "трек"))[1] or "трек"
             ext = os.path.splitext(path)[1] or ".mp3"
             safe = re.sub(r'[\\/:*?"<>|\s]+', "_", title).strip("_")[:80] or "track"
             fname = safe + ext
-            self._send("📤 Отправляю «%s» в Telegram…" % title)
+            dest = os.path.join(DL_DIR, fname)
+            i = 1
+            while os.path.exists(dest):
+                dest = os.path.join(DL_DIR, "%s_%d%s" % (safe, i, ext))
+                i += 1
             try:
-                res = self._tg_send_document(TG_OWNER_USER_ID, path, title[:100], fname)
-                if res.get("ok"):
-                    self._send("✅ Отправил файл тебе в Telegram.")
-                else:
-                    self._send("Не удалось отправить: %s" % str(res.get("description", res))[:120])
+                shutil.copy2(path, dest)
             except Exception as e:
-                log("dl send err: %s" % str(e)[:150])
-                self._send("Ошибка отправки: %s" % str(e)[:120])
+                log("dl copy err: %s" % str(e)[:150])
+                self._send("Ошибка сохранения: %s" % str(e)[:120])
+                return
+            self._send("✅ Файл сохранён на сервере: %s" % dest)
             return
 
         if cmd in ("помощь", "help", "h", "команды", "commands"):
@@ -2181,7 +2164,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "sv yt / sv ym — сервис\n"
             "cn <ник> — сменить ник бота\n"
             "lf <путь> — играть локальный файл\n"
-            "dl — скачать играющий трек файлом в Telegram\n"
+            "dl — сохранить играющий трек файлом на сервере\n"
             "vo — озвучка названий треков вкл/выкл\n"
             "rs — перезапустить бота\n"
             "очередь, статус, помощь\n"
