@@ -107,6 +107,7 @@ CHANNEL_MSG_FILE = os.path.join(BASE_DIR, ".channel_msg")
 FAVORITES_FILE = os.path.join(BASE_DIR, "favorites.json")
 SUBS_FILE = os.path.join(BASE_DIR, "subs.json")
 SUB_TTL_SEC = 86400  # сколько живёт ссылка-подписка (24 ч)
+ADMINS_FILE = os.path.join(BASE_DIR, "users.db")  # user id администраторов Telegram
 
 TG_TOKEN = str(_cfg("telegram_relay.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
 TG_OWNER_USER_ID = int(_cfg("telegram_relay.owner_user_id", "TG_OWNER_USER_ID", 0) or 0)  # only this user can send commands
@@ -277,6 +278,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.sub_pending = {}  # token -> {nick, username, nUserID, created}
         self.sub_active = {}  # chat_id(str) -> {nick, username, nUserID, subscribed_at}
         self._load_subs()
+        self.admins = self._load_admins()  # user id администраторов Telegram (users.db); владелец — всегда
         if TG_TOKEN:
             threading.Thread(target=self._tg_poll, daemon=True, name="tg-poll").start()
             threading.Thread(target=self._tg_register_commands, daemon=True, name="tg-cmds").start()
@@ -377,12 +379,13 @@ class MusicBot(TeamTalk5.TeamTalk):
                 time.sleep(5)
 
     def _tg_allowed(self, msg):
-        """Only the configured owner may send commands (empty = allow anyone)."""
-        if not TG_OWNER_USER_ID:
+        """Владелец из конфига и админы из users.db могут слать команды."""
+        if not TG_OWNER_USER_ID and not self.admins:
             return True
+        ids = self._tg_admin_ids()
         uid = (msg.get("from") or {}).get("id")
         cid = (msg.get("chat") or {}).get("id")
-        return uid == TG_OWNER_USER_ID or cid == TG_OWNER_USER_ID
+        return uid in ids or cid in ids
 
     def _tg_handle_update(self, upd):
         msg = upd.get("message") or upd.get("channel_post")
@@ -403,6 +406,22 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return
             # treat text as a bot command; mirror replies back to this chat
             if not self._tg_allowed(msg):
+                return
+            cid = (msg.get("chat") or {}).get("id")
+            if low in ("/admins", "admins"):
+                self._tg_send_text(cid, self._admins_text())
+                return
+            if low.startswith("/admin ") or low == "/admin":
+                self._tg_admin_cmd(msg, text)
+                return
+            if low.startswith("/unadmin ") or low == "/unadmin":
+                self._tg_unadmin_cmd(msg, text)
+                return
+            if low in ("/subs", "subs"):
+                self._tg_send_text(cid, self._subs_text())
+                return
+            if low.startswith("/delsub ") or low == "/delsub":
+                self._tg_delsub_cmd(msg, text)
                 return
             prev = self.reply_user_id
             self.reply_user_id = 0
@@ -467,8 +486,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         who = rec.get("nick") or rec.get("username") or "твой аккаунт"
         self._tg_send_text(cid, "✅ Подписка активна (%s): будешь получать уведомления о входе/выходе на сервере «%s». Отписаться — /unsub." % (who, self._server_name()))
 
-    def _tg_help_text(self):
-        return (
+    def _tg_help_text(self, is_admin=False):
+        text = (
             "Команды бота:\n"
             "п <запрос> / пи <запрос> — поиск и игра (YouTube / Яндекс.Музыка)\n"
             "n — следующий, b — предыдущий\n"
@@ -485,15 +504,26 @@ class MusicBot(TeamTalk5.TeamTalk):
             "cn <ник> — ник бота\n"
             "очередь, статус, онлайн — кто сейчас на сервере\n"
             "sub — ссылка на подписку (команда работает в TeamTalk)\n"
-            "Управляет ботом владелец."
+            "Музыку заказывает любой, управление ботом — только админам."
         )
+        if is_admin:
+            text += "\nДля админов: /admins, /admin <id>, /unadmin <id>, /subs, /delsub <id>"
+        return text
+
+    def _tg_is_admin_msg(self, msg):
+        ids = self._tg_admin_ids()
+        uid = (msg.get("from") or {}).get("id")
+        cid = (msg.get("chat") or {}).get("id")
+        return uid in ids or cid in ids
 
     def _tg_handle_help(self, msg):
-        self._tg_send_text((msg.get("chat") or {}).get("id"), self._tg_help_text())
+        self._tg_send_text((msg.get("chat") or {}).get("id"),
+                           self._tg_help_text(self._tg_is_admin_msg(msg)))
 
     def _tg_register_commands(self):
-        """Настроить меню команд бота в Telegram (видно всем, не только владельцу)."""
-        commands = [
+        """Меню команд бота: не-админам — только общие, админам — плюс админские
+        (scope в Telegram позволяет раздать меню по чатам)."""
+        public = [
             {"command": "help", "description": "Список команд"},
             {"command": "start", "description": "Подписка по ссылке / старт"},
             {"command": "unsub", "description": "Отписаться от уведомлений"},
@@ -505,9 +535,21 @@ class MusicBot(TeamTalk5.TeamTalk):
             {"command": "favorites", "description": "Избранное: /favorites"},
             {"command": "radio", "description": "Радиостанции"},
         ]
+        admin = [
+            {"command": "admins", "description": "Список админов бота"},
+            {"command": "admin", "description": "Назначить админа: /admin <id>"},
+            {"command": "unadmin", "description": "Снять админа: /unadmin <id>"},
+            {"command": "subs", "description": "Список подписчиков"},
+            {"command": "delsub", "description": "Убрать подписку: /delsub <id>"},
+        ]
         try:
-            self._tg_api("setMyCommands", commands=json.dumps(commands))
-            log("tg commands registered")
+            # общее меню по умолчанию — без админских команд
+            self._tg_api("setMyCommands", commands=json.dumps(public))
+            # админам — полное меню в личных чатах
+            for aid in self._tg_admin_ids():
+                self._tg_api("setMyCommands", commands=json.dumps(public + admin),
+                             scope=json.dumps({"type": "chat", "chat_id": aid}))
+            log("tg commands registered (%d admin scopes)" % len(self._tg_admin_ids()))
         except Exception as e:
             log("tg setMyCommands err: %s" % str(e)[:120])
 
@@ -1437,6 +1479,16 @@ class MusicBot(TeamTalk5.TeamTalk):
             self.reply_user_id = from_user
         self.silent = False  # explicit command → report status again
 
+        # --- гейт: служебные команды — только администраторам ---
+        # (в TeamTalk админ = USERTYPE_ADMIN; из Telegram сюда попадают уже после _tg_allowed)
+        first = cmd.split(None, 1)[0]
+        admin_only = first in ("rs", "рестарт", "restart", "перезагрузка", "cn", "sv", "svc", "сервис", "cm", "channel")
+        if not admin_only:
+            admin_only = cmd.startswith("lf ") or cmd.startswith("файл ") or cmd.startswith("локальный ")
+        if admin_only and not self._is_admin(from_user):
+            self._send("Эта команда только для администраторов.")
+            return
+
         # --- громкость: v 100 / v 50 / громкость 30 / volume 80 ---
         m = re.match(r"^(?:v|громкость|громко|volume)\s+(\d{1,3})$", cmd)
         if m:
@@ -1821,6 +1873,111 @@ class MusicBot(TeamTalk5.TeamTalk):
                           f, ensure_ascii=False, indent=2)
         except Exception as e:
             log("subs save err: %s" % e)
+
+    def _load_admins(self):
+        """Админы Telegram из users.db (владелец из конфига — админ всегда)."""
+        try:
+            with open(ADMINS_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            return [int(a) for a in (d.get("admins") or []) if str(a).strip()]
+        except Exception:
+            return []
+
+    def _save_admins(self):
+        try:
+            with open(ADMINS_FILE, "w", encoding="utf-8") as f:
+                json.dump({"admins": self.admins}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log("admins save err: %s" % e)
+
+    def _tg_admin_ids(self):
+        ids = set(self.admins)
+        if TG_OWNER_USER_ID:
+            ids.add(TG_OWNER_USER_ID)
+        return ids
+
+    def _is_admin(self, from_user):
+        """TeamTalk: админ = USERTYPE_ADMIN (2) на сервере. Telegram-путь (from_user=0)
+        уже отфильтрован в _tg_allowed, поэтому проходит."""
+        if not from_user:
+            return True
+        u = self.users.get(from_user)
+        return bool(u and int(getattr(u, "uUserType", 0) or 0) == 2)
+
+    def _admins_text(self):
+        ids = sorted(self._tg_admin_ids())
+        lines = ["Администраторы (%d):" % len(ids)]
+        for i in ids:
+            lines.append("%s%s" % (i, "  (владелец)" if i == TG_OWNER_USER_ID else ""))
+        return "\n".join(lines)
+
+    def _subs_text(self):
+        if not self.sub_active:
+            return "Подписчиков пока нет."
+        lines = ["Подписчики (%d):" % len(self.sub_active)]
+        for cid, rec in sorted(self.sub_active.items()):
+            who = rec.get("nick") or rec.get("username") or "?"
+            lines.append("%s — %s" % (cid, who))
+        lines.append("Убрать: /delsub <user_id>")
+        return "\n".join(lines)
+
+    def _tg_admin_cmd(self, msg, text):
+        """/admin <user_id> — назначить админа (только владелец), пишется в users.db."""
+        cid = (msg.get("chat") or {}).get("id")
+        uid = (msg.get("from") or {}).get("id")
+        if uid != TG_OWNER_USER_ID:
+            self._tg_send_text(cid, "Назначать админов может только владелец.")
+            return
+        parts = text.split()
+        if len(parts) < 2 or not parts[1].lstrip("+-").isdigit():
+            self._tg_send_text(cid, "Формат: /admin <user_id>")
+            return
+        aid = int(parts[1])
+        if aid in self.admins:
+            self._tg_send_text(cid, "%s уже админ." % aid)
+            return
+        self.admins.append(aid)
+        self._save_admins()
+        self._tg_register_commands()
+        self._tg_send_text(cid, "✅ Админ назначен: %s (users.db обновлён)." % aid)
+
+    def _tg_unadmin_cmd(self, msg, text):
+        """/unadmin <user_id> — снять админа (только владелец)."""
+        cid = (msg.get("chat") or {}).get("id")
+        uid = (msg.get("from") or {}).get("id")
+        if uid != TG_OWNER_USER_ID:
+            self._tg_send_text(cid, "Снимать админов может только владелец.")
+            return
+        parts = text.split()
+        if len(parts) < 2 or not parts[1].lstrip("+-").isdigit():
+            self._tg_send_text(cid, "Формат: /unadmin <user_id>")
+            return
+        aid = int(parts[1])
+        if aid == TG_OWNER_USER_ID:
+            self._tg_send_text(cid, "Владельца снять нельзя.")
+            return
+        if aid in self.admins:
+            self.admins.remove(aid)
+            self._save_admins()
+            self._tg_register_commands()
+            self._tg_send_text(cid, "Админ снят: %s (users.db обновлён)." % aid)
+        else:
+            self._tg_send_text(cid, "%s не админ." % aid)
+
+    def _tg_delsub_cmd(self, msg, text):
+        """/delsub <user_id> — убрать подписку подписчика (только админы)."""
+        cid = (msg.get("chat") or {}).get("id")
+        parts = text.split()
+        if len(parts) < 2 or not parts[1].lstrip("+-").isdigit():
+            self._tg_send_text(cid, "Формат: /delsub <user_id>")
+            return
+        sid = str(int(parts[1]))
+        if sid in self.sub_active:
+            del self.sub_active[sid]
+            self._save_subs()
+            self._tg_send_text(cid, "Подписка удалена: %s." % sid)
+        else:
+            self._tg_send_text(cid, "Нет подписчика с id %s." % sid)
 
     def _tg_bot_username(self):
         if self._tg_username:
