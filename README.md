@@ -1,6 +1,6 @@
-# TeamTalk Music Bot
+# TeamTalk Universal Plugin
 
-Бот для TeamTalk 5: проигрывает музыку и другое аудио в голосовом канале по ссылкам и поиску. Аудио передаётся как голос (`TT_InsertAudioBlock`), звуковые устройства не требуются.
+Универсальный плагин для TeamTalk 5: музыка и другое аудио в голосовом канале по ссылкам и поиску, плюс оповещатель о входе/выходе пользователей в Telegram. Аудио передаётся как голос (`TT_InsertAudioBlock`), звуковые устройства не требуются.
 
 ## Возможности
 
@@ -49,8 +49,8 @@
 ### 1. Клонируй репозиторий
 
 ```bash
-git clone https://github.com/zolo-kirill/teamtalk-music-bot.git
-cd teamtalk-music-bot
+git clone https://github.com/zolo-kirill/teamtalk-universal-plugin.git
+cd teamtalk-universal-plugin
 ```
 
 ### 2. Проверь TeamTalk SDK
@@ -74,7 +74,7 @@ sudo apt-get install -y ffmpeg python3 python3-pip python3-venv
 bash install.sh
 ```
 
-Установщик создаёт `.venv` с yt-dlp и yandex-music, проверяет SDK, создаёт шаблон `.secrets/.env`, ставит пользовательский systemd-сервис `teamtalk-music-bot` с автозапуском. Бот работает под твоим пользователем (не root), sudo нужен только для установки системных пакетов.
+Установщик создаёт `.venv` с yt-dlp и yandex-music, проверяет SDK, создаёт шаблон `.secrets/.env`, ставит пользовательский systemd-сервис `teamtalk-universal-plugin` с автозапуском. Бот работает под твоим пользователем (не root), sudo нужен только для установки системных пакетов.
 
 Или вручную:
 
@@ -96,8 +96,8 @@ bash run.sh
 Или, если ставил через `install.sh`, — сервис уже работает и поднимется сам после перезагрузки:
 
 ```bash
-systemctl --user status teamtalk-music-bot    # статус
-journalctl --user -u teamtalk-music-bot -f    # логи
+systemctl --user status teamtalk-universal-plugin    # статус
+journalctl --user -u teamtalk-universal-plugin -f    # логи
 ```
 
 ## Файлы
@@ -109,4 +109,4 @@ journalctl --user -u teamtalk-music-bot -f    # логи
 - `radio/` — плейлисты радиостанций (m3u)
 - `run.sh` — обёртка запуска (SDK env, секреты, venv)
 - `install.sh` — автоустановщик
-- `teamtalk-music-bot.service` — systemd-юнит
+- `teamtalk-universal-plugin.service` — systemd-юнит

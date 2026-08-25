@@ -94,7 +94,7 @@ MAX_VOLUME = int(_cfg("player.max_volume", None, 100))
 DEFAULT_SERVICE = str(_cfg("general.default_service", None, "yt"))
 DEFAULT_CHANNEL_MSG = bool(_cfg("general.send_channel_messages", None, True))
 START_COMMANDS = list(_cfg("general.start_commands", None, []))
-CLIENTNAME = "teamtalk-music-bot"
+CLIENTNAME = "teamtalk-universal-plugin"
 
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -108,7 +108,7 @@ FAVORITES_FILE = os.path.join(BASE_DIR, "favorites.json")
 TG_TOKEN = str(_cfg("telegram_relay.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
 TG_OWNER_USER_ID = int(_cfg("telegram_relay.owner_user_id", "TG_OWNER_USER_ID", 0) or 0)  # only this user can send commands
 TG_NOTIFY_CHAT_ID = int(_cfg("telegram_relay.notify_chat_id", "TG_NOTIFY_CHAT_ID", 0) or 0)  # сюда слать вход/выход пользователей (0 = выкл)
-TG_NOTIFY_SERVER = str(_cfg("telegram_relay.notify_server_name", "TG_NOTIFY_SERVER_NAME", "тёплый свет")).strip() or "тёплый свет"
+TG_NOTIFY_SERVER = str(_cfg("telegram_relay.notify_server_name", "TG_NOTIFY_SERVER_NAME", "")).strip()  # пусто = брать имя сервера из TeamTalk
 TG_NOTIFY_IGNORE = {u.strip().lower() for u in (_cfg("telegram_relay.ignore_users", None, []) or []) if u.strip()}
 TG_NOTIFY_IGNORE.add("bot_admin")  # все боты на одной админ-учётке — их не анонсируем
 
@@ -1673,6 +1673,19 @@ class MusicBot(TeamTalk5.TeamTalk):
                 log("tg notify err: %s" % str(e)[:120])
         threading.Thread(target=_do, daemon=True).start()
 
+    def _server_name(self):
+        if TG_NOTIFY_SERVER:
+            return TG_NOTIFY_SERVER
+        try:
+            sp = self.getServerProperties()
+            if sp:
+                name = self._tt_field(sp, "szServerName")
+                if name:
+                    return name
+        except Exception:
+            pass
+        return "TeamTalk"
+
     def _notify_join_leave(self, sign, user):
         """Announce a user logging in (+)/out (-) to the configured Telegram chat."""
         try:
@@ -1689,9 +1702,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             if self._tt_field(user, "szUsername").lower() in TG_NOTIFY_IGNORE:
                 return
             if sign == "+":
-                text = "%s присоединился к серверу %s" % (nick, TG_NOTIFY_SERVER)
+                text = "%s присоединился к серверу %s" % (nick, self._server_name())
             else:
-                text = "%s покинул сервер %s" % (nick, TG_NOTIFY_SERVER)
+                text = "%s покинул сервер %s" % (nick, self._server_name())
             self._tg_send_notify(text)
         except Exception as e:
             log("notify join/leave err: %s" % str(e)[:150])

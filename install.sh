@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Interactive installer for the TeamTalk Music Bot.
+# Interactive installer for the TeamTalk Universal Plugin.
 # Menu: install / uninstall / exit. Asks all config, clones the repo,
 # installs (apt, venv, SDK check, .secrets, systemd service) and starts the bot.
 #
@@ -10,8 +10,8 @@
 set -euo pipefail
 
 CREATOR_LINE="Created by zolo-kirill. For any questions contact @zolo-kirill on Telegram."
-REPO_URL_DEFAULT="https://github.com/zolo-kirill/teamtalk-music-bot.git"
-UNIT_NAME="teamtalk-music-bot.service"
+REPO_URL_DEFAULT="https://github.com/zolo-kirill/teamtalk-universal-plugin.git"
+UNIT_NAME="teamtalk-universal-plugin.service"
 UNIT_DIR="$HOME/.config/systemd/user"
 DRY_RUN="${SETUP_DRY_RUN:-0}"
 
@@ -91,13 +91,13 @@ do_install() {
     local CONFIRM="" START_NOW=""
 
     say ""
-    say "== Install TeamTalk Music Bot =="
+    say "== Install TeamTalk Universal Plugin =="
 
     # --- 1. repository (clone if no bot next to the installer) ---
     if [ ! -f "$REPO_DIR/bot.py" ]; then
         say "  bot.py not found next to the installer — cloning the repository."
         ask git_url "Repository URL" "$REPO_URL_DEFAULT"
-        ask REPO_DIR "Clone to directory?" "$HOME/teamtalk-music-bot"
+        ask REPO_DIR "Clone to directory?" "$HOME/teamtalk-universal-plugin"
         REPO_DIR="${REPO_DIR/#\~/$HOME}"
         if [ -e "$REPO_DIR" ]; then
             if [ -f "$REPO_DIR/bot.py" ]; then
@@ -203,7 +203,7 @@ do_install() {
         say "    [dry] writing $ENV_FILE"
     else
         {
-            say "# TeamTalk Music Bot — configuration (generated $(date -Iseconds))"
+            say "# TeamTalk Universal Plugin — configuration (generated $(date -Iseconds))"
             say "TEAMTALK_HOST=$(q "$TEAMTALK_HOST")"
             say "TEAMTALK_TCP_PORT=$(q "$TEAMTALK_TCP_PORT")"
             say "TEAMTALK_UDP_PORT=$(q "$TEAMTALK_UDP_PORT")"
@@ -242,12 +242,12 @@ do_install() {
     fi
 
     # systemd service (if present) or a background start
-    if [ -d "/run/systemd/system" ] && [ -f "$REPO_DIR/teamtalk-music-bot.service" ]; then
+    if [ -d "/run/systemd/system" ] && [ -f "$REPO_DIR/teamtalk-universal-plugin.service" ]; then
         mkdir -p "$UNIT_DIR"
         if [ "$DRY_RUN" = "1" ]; then
             say "    [dry] sed __DIR__ -> $UNIT_DIR/$UNIT_NAME"
         else
-            sed -e "s|__DIR__|$REPO_DIR|g" "$REPO_DIR/teamtalk-music-bot.service" > "$UNIT_DIR/$UNIT_NAME"
+            sed -e "s|__DIR__|$REPO_DIR|g" "$REPO_DIR/teamtalk-universal-plugin.service" > "$UNIT_DIR/$UNIT_NAME"
         fi
         run systemctl --user daemon-reload
         run systemctl --user enable "$UNIT_NAME"
@@ -283,7 +283,7 @@ do_uninstall() {
     local repo="" secrets="" unit="$UNIT_DIR/$UNIT_NAME"
 
     say ""
-    say "== Uninstall TeamTalk Music Bot =="
+    say "== Uninstall TeamTalk Universal Plugin =="
 
     # find the repository: next to the installer or from the service ExecStart
     if [ -f "$SCRIPT_DIR/bot.py" ]; then
@@ -369,7 +369,7 @@ menu() {
     done
 }
 
-say "== TeamTalk Music Bot — installer =="
+say "== TeamTalk Universal Plugin — installer =="
 say "  $CREATOR_LINE"
 if [ "$DRY_RUN" = "1" ]; then
     say "  (dry-run mode SETUP_DRY_RUN=1 — no real actions performed)"
