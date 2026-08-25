@@ -388,6 +388,10 @@ class MusicBot(TeamTalk5.TeamTalk):
         return uid in ids or cid in ids
 
     def _tg_handle_update(self, upd):
+        cq = upd.get("callback_query")
+        if cq:
+            self._tg_handle_callback(cq)
+            return
         msg = upd.get("message") or upd.get("channel_post")
         if not msg:
             return
@@ -418,7 +422,8 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._tg_unadmin_cmd(msg, text)
                 return
             if low in ("/subs", "subs"):
-                self._tg_send_text(cid, self._subs_text())
+                text, kb = self._subs_list_view()
+                self._tg_send_kb(cid, text, kb)
                 return
             if low.startswith("/delsub ") or low == "/delsub":
                 self._tg_delsub_cmd(msg, text)
@@ -455,6 +460,158 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._tg_api("sendMessage", chat_id=chat_id, text=text[:4000])
         except Exception as e:
             log("tg send err: %s" % str(e)[:120])
+
+    # ---- inline-клавиатуры: интерактивное управление подписчиками ----
+
+    def _tg_send_kb(self, chat_id, text, kb):
+        try:
+            self._tg_api("sendMessage", chat_id=chat_id, text=text[:4000],
+                         reply_markup=json.dumps({"inline_keyboard": kb}))
+        except Exception as e:
+            log("tg send_kb err: %s" % str(e)[:120])
+
+    def _tg_edit_kb(self, chat_id, message_id, text, kb):
+        try:
+            self._tg_api("editMessageText", chat_id=chat_id, message_id=message_id,
+                         text=text[:4000],
+                         reply_markup=json.dumps({"inline_keyboard": kb}))
+        except Exception as e:
+            log("tg edit_kb err: %s" % str(e)[:120])
+
+    def _tg_answer_cb(self, qid, text="", alert=False):
+        try:
+            self._tg_api("answerCallbackQuery", callback_query_id=qid,
+                         text=text[:200], show_alert=alert)
+        except Exception as e:
+            log("tg answer_cb err: %s" % str(e)[:120])
+
+    def _tg_cb_allowed(self, cq):
+        ids = self._tg_admin_ids()
+        uid = (cq.get("from") or {}).get("id")
+        cid = (cq.get("message") or {}).get("chat", {}).get("id")
+        return uid in ids or cid in ids
+
+    def _subs_list_view(self):
+        """Текст и кнопки списка подписчиков: по кнопке на подписчика."""
+        items = sorted(self.sub_active.items(), key=lambda kv: str(kv[0]))
+        lines = ["Подписчики (%d):" % len(items)]
+        kb = []
+        for cid, rec in items:
+            nick = rec.get("nick") or rec.get("username") or "?"
+            kb.append([{"text": "%s (id %s)" % (nick, cid),
+                        "callback_data": "subs:view:%s" % cid}])
+        if items:
+            lines.append("Нажми на подписчика — откроются действия.")
+        else:
+            lines.append("Пока никто не подписан.")
+        return "\n".join(lines), kb
+
+    def _subs_view(self, cid, actor_uid):
+        """Карточка подписчика: статус и кнопки действий."""
+        rec = self.sub_active.get(str(cid)) or {}
+        nick = rec.get("nick") or rec.get("username") or "?"
+        is_admin = int(cid) in self.admins
+        is_owner = str(cid) == str(TG_OWNER_USER_ID)
+        lines = [
+            "Подписчик: %s" % nick,
+            "ID: %s" % cid,
+        ]
+        if rec.get("subscribed_at"):
+            lines.append("Подписан: %s" % time.strftime("%d.%m %H:%M",
+                        time.localtime(rec["subscribed_at"])))
+        if is_owner:
+            lines.append("Статус: владелец")
+        elif is_admin:
+            lines.append("Статус: админ")
+        else:
+            lines.append("Статус: подписчик")
+        kb = []
+        if is_owner:
+            lines.append("Владельца нельзя отписать или снять с админов.")
+        else:
+            if actor_uid == TG_OWNER_USER_ID:
+                if is_admin:
+                    kb.append([{"text": "Убрать из админов",
+                                "callback_data": "subs:unadmin:%s" % cid}])
+                else:
+                    kb.append([{"text": "Назначить админом",
+                                "callback_data": "subs:makeadmin:%s" % cid}])
+            kb.append([{"text": "Отписать от уведомлений",
+                        "callback_data": "subs:del:%s" % cid}])
+        kb.append([{"text": "Назад к списку", "callback_data": "subs:list"}])
+        return "\n".join(lines), kb
+
+    def _tg_handle_callback(self, cq):
+        data = cq.get("data") or ""
+        qid = cq.get("id")
+        actor = (cq.get("from") or {}).get("id")
+        cid = (cq.get("message") or {}).get("chat", {}).get("id")
+        mid = (cq.get("message") or {}).get("message_id")
+        if not self._tg_cb_allowed(cq):
+            self._tg_answer_cb(qid, "Нет доступа.", alert=True)
+            return
+        if data == "subs:list":
+            self._tg_answer_cb(qid)
+            text, kb = self._subs_list_view()
+            self._tg_edit_kb(cid, mid, text, kb)
+            return
+        if data.startswith("subs:view:"):
+            self._tg_answer_cb(qid)
+            target = data.split(":", 2)[2]
+            text, kb = self._subs_view(target, actor)
+            self._tg_edit_kb(cid, mid, text, kb)
+            return
+        if data.startswith("subs:makeadmin:"):
+            if actor != TG_OWNER_USER_ID:
+                self._tg_answer_cb(qid, "Назначать админов может только владелец.", alert=True)
+                return
+            target = data.split(":", 2)[2]
+            if str(target) == str(TG_OWNER_USER_ID):
+                self._tg_answer_cb(qid, "Владелец и так админ.", alert=True)
+                return
+            if int(target) in self.admins:
+                self._tg_answer_cb(qid, "Уже админ.", alert=True)
+                return
+            self.admins.append(int(target))
+            self._save_admins()
+            self._tg_register_commands()
+            self._tg_answer_cb(qid, "Админ назначен.")
+            text, kb = self._subs_view(target, actor)
+            self._tg_edit_kb(cid, mid, text, kb)
+            return
+        if data.startswith("subs:unadmin:"):
+            if actor != TG_OWNER_USER_ID:
+                self._tg_answer_cb(qid, "Снимать админов может только владелец.", alert=True)
+                return
+            target = data.split(":", 2)[2]
+            if str(target) == str(TG_OWNER_USER_ID):
+                self._tg_answer_cb(qid, "Владельца нельзя снять.", alert=True)
+                return
+            if int(target) in self.admins:
+                self.admins.remove(int(target))
+                self._save_admins()
+                self._tg_register_commands()
+                self._tg_answer_cb(qid, "Админ снят.")
+            else:
+                self._tg_answer_cb(qid, "Не админ.", alert=True)
+            text, kb = self._subs_view(target, actor)
+            self._tg_edit_kb(cid, mid, text, kb)
+            return
+        if data.startswith("subs:del:"):
+            target = data.split(":", 2)[2]
+            if str(target) == str(TG_OWNER_USER_ID):
+                self._tg_answer_cb(qid, "Владельца нельзя отписать.", alert=True)
+                return
+            if str(target) in self.sub_active:
+                del self.sub_active[str(target)]
+                self._save_subs()
+                self._tg_answer_cb(qid, "Подписка убрана.")
+                text, kb = self._subs_list_view()
+                self._tg_edit_kb(cid, mid, text, kb)
+            else:
+                self._tg_answer_cb(qid, "Не подписчик.", alert=True)
+            return
+        log("tg unknown callback: %s" % data)
 
     def _tg_handle_sub_msg(self, msg, text):
         """/start (по deep-link sub_<token>) и /unsub — для подписчиков, не только владельца."""
@@ -1909,16 +2066,6 @@ class MusicBot(TeamTalk5.TeamTalk):
         lines = ["Администраторы (%d):" % len(ids)]
         for i in ids:
             lines.append("%s%s" % (i, "  (владелец)" if i == TG_OWNER_USER_ID else ""))
-        return "\n".join(lines)
-
-    def _subs_text(self):
-        if not self.sub_active:
-            return "Подписчиков пока нет."
-        lines = ["Подписчики (%d):" % len(self.sub_active)]
-        for cid, rec in sorted(self.sub_active.items()):
-            who = rec.get("nick") or rec.get("username") or "?"
-            lines.append("%s — %s" % (cid, who))
-        lines.append("Убрать: /delsub <user_id>")
         return "\n".join(lines)
 
     def _tg_admin_cmd(self, msg, text):
