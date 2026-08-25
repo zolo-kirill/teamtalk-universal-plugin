@@ -646,8 +646,18 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("playlist worker err: %s" % e)
             self.api_q.put(("playlist_done", url, []))
 
+    def _normalize_ym_url(self, url):
+        """Map a direct Yandex.Music track URL (album/<a>/track/<id> or
+        track/<id>) to its ymtrack:<id> key. yt-dlp cannot handle such URLs
+        and crashes with a TypeError, so they must go through the YM API."""
+        m = re.search(r"music\.yandex\.[^/\s]+/(?:album/[^/?#]+/)?track/(\d+)", url)
+        if m:
+            return "ymtrack:%s" % m.group(1)
+        return url
+
     def _handle_url(self, url, label):
         """Play a direct link; a YouTube/Yandex playlist queues all its tracks."""
+        url = self._normalize_ym_url(url)
         if self._is_yt_playlist_url(url) or self._is_ym_playlist_url(url):
             self._send("📃 Плейлист: собираю треки…")
             threading.Thread(target=self._playlist_worker, args=(url,), daemon=True).start()
@@ -1007,6 +1017,7 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _switch_to(self, key, label):
         """Stop whatever plays and immediately play `key` (used by n/b and direct links)."""
+        key = self._normalize_ym_url(key)
         self.auto_list = False
         self.auto_playlist = False
         self.queue.clear()
