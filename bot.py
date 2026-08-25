@@ -2323,7 +2323,7 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _help_cmd(self):
         self._send(
-            "Команды — со слэшем. Всё остальное бот пересылает в Telegram.\n"
+            "Команды — со слэшем. Личные сообщения боту пересылаются админам в Telegram.\n"
             "/п <запрос> — поиск (покажет список), играет №1\n"
             "/n — следующий, /b — предыдущий (по списку или плейлисту)\n"
             "/пл <страница> — полный список плейлиста постранично\n"
@@ -2544,22 +2544,6 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._save_replies()
         except Exception as e:
             log("forward private err: %s" % str(e)[:150])
-
-    def _tt_forward_channel(self, from_uid, text):
-        """Переслать сообщение из канала TeamTalk админам в Telegram (без ответа-реплики)."""
-        try:
-            u = self.users.get(from_uid)
-            nick = self._tt_field(u, "szNickname") if u else ""
-            uname = self._tt_field(u, "szUsername") if u else ""
-            ident = (nick or uname or "").strip().lower()
-            if ident in TG_NOTIFY_IGNORE:
-                return  # свои боты на той же учётке — не эхом
-            who = nick or uname or "id %s" % from_uid
-            body = "Канал TeamTalk, %s: %s" % (who, text)
-            for chat in self._forward_recipients():
-                self._tg_forward_user_msg(body, chat)
-        except Exception as e:
-            log("forward channel err: %s" % str(e)[:150])
 
     def _send_to_tt_user(self, uid, text):
         """Отправить личное сообщение конкретному пользователю TeamTalk (MSGTYPE_USER)."""
@@ -2840,13 +2824,12 @@ class MusicBot(TeamTalk5.TeamTalk):
             if self._is_typing_indicator(msg):
                 log("typing indicator from %d, skip" % textmessage.nFromUserID)
                 return
-            # команды — только со слэшем (/sub, /play, ...); любое другое сообщение
-            # пересылаем в Telegram: личку — с возможностью ответить, канал — просто релеем
+            # команды — только со слэшем (/sub, /play, ...); не-команды:
+            # в личку бота — пересылаем админам (с возможностью ответить),
+            # сообщения в канал — игнорируем (пересылка только засоряла чат)
             if not self._is_tt_command(msg):
                 if int(getattr(textmessage, "nMsgType", 0) or 0) == TextMsgType.MSGTYPE_USER:
                     self._tt_forward_private(textmessage.nFromUserID, msg)
-                else:
-                    self._tt_forward_channel(textmessage.nFromUserID, msg)
                 return
             self._handle_cmd(msg, textmessage.nFromUserID)
         except Exception as e:
