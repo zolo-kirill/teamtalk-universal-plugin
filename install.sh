@@ -191,7 +191,7 @@ do_install() {
     say ""
     say "== 5/6 TeamTalk SDK =="
     local SDK_LIB=""
-    SDK_LIB="$(ls -d "$REPO_DIR"/sdk/tt5sdk*/*/Library/TeamTalk_DLL/libTeamTalk5.so 2>/dev/null | head -1 || true)"
+    SDK_LIB="$(ls -d "$REPO_DIR"/sdk/tt5sdk*/Library/TeamTalk_DLL/libTeamTalk5.so 2>/dev/null | head -1 || true)"
     if [ -n "$SDK_LIB" ]; then
         say "  SDK найден: $SDK_LIB"
     else
