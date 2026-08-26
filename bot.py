@@ -295,6 +295,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         # optional Telegram relay: an own bot that forwards files and commands into the channel
         self._tg_offset = 0
         self._tg_reply_chat = None  # set while handling a Telegram command → mirror replies
+        self._pending_msg = None  # ожидание текста для отправки ЛС в TeamTalk: {cid, uid, nick}
         self._ready_time = None  # when the bot finished joining — for join/leave notify grace
         # подписки на уведомления: /sub в TeamTalk → ссылка → активация в Telegram
         self.users = {}  # nUserID -> User (кто сейчас на сервере)
@@ -603,7 +604,11 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._tg_handle_help(msg)
                 return
             if low in ("/online", "online", "онлайн"):
-                self._tg_send_text((msg.get("chat") or {}).get("id"), self._online_text())
+                text, kb = self._online_view()
+                if kb:
+                    self._tg_send_kb((msg.get("chat") or {}).get("id"), text, kb)
+                else:
+                    self._tg_send_text((msg.get("chat") or {}).get("id"), text)
                 return
             # treat text as a bot command; mirror replies back to this chat
             if not self._tg_allowed(msg):
@@ -621,6 +626,18 @@ class MusicBot(TeamTalk5.TeamTalk):
                 else:
                     self._tg_send_text(cid, "Не отправилось: пользователь офлайн или ЛС недоступно.")
                 return
+            # ожидание текста для отправки личного сообщения пользователю (из /online)
+            if self._pending_msg and self._pending_msg.get("cid") == cid:
+                if text.startswith("/"):
+                    self._pending_msg = None
+                else:
+                    pm = self._pending_msg
+                    self._pending_msg = None
+                    if self._send_to_tt_user(pm["uid"], text):
+                        self._tg_send_text(cid, "Отправил %s в TeamTalk." % (pm.get("nick") or pm["uid"]))
+                    else:
+                        self._tg_send_text(cid, "Не отправилось: пользователь офлайн или ЛС недоступно.")
+                    return
             if low in ("/admins", "admins"):
                 self._tg_send_text(cid, self._admins_text())
                 return
@@ -791,6 +808,48 @@ class MusicBot(TeamTalk5.TeamTalk):
             kb.append([{"text": label, "callback_data": "%s:do:%s" % (mode, uid)}])
         return "\n".join(lines), kb
 
+    def _online_view(self):
+        """Кто на сервере — кнопки по пользователям (кроме бота). Нажатие открывает действия."""
+        users = []
+        for uid, u in list(self.users.items()):
+            if uid == self.my_user_id:
+                continue
+            nick = self._tt_field(u, "szNickname") or self._tt_field(u, "szUsername")
+            users.append((uid, nick, u))
+        users.sort(key=lambda r: (r[1] or "").lower())
+        server = self._server_name()
+        if not users:
+            return "Сейчас на сервере «%s» никого, кроме меня." % server, []
+        lines = ["Сейчас на сервере «%s» (%d):" % (server, len(users)),
+                 "Нажми на пользователя — действия."]
+        kb = []
+        for uid, nick, u in users:
+            kb.append([{"text": nick or "id %s" % uid, "callback_data": "online:view:%s" % uid}])
+        return "\n".join(lines), kb
+
+    def _user_view(self, uid):
+        """Карточка онлайн-пользователя: инфо + действия (ЛС, кик, бан)."""
+        u = self.users.get(uid)
+        if not u:
+            return "Пользователь уже покинул сервер.", []
+        nick = self._tt_field(u, "szNickname") or self._tt_field(u, "szUsername") or "id %s" % uid
+        uname = self._tt_field(u, "szUsername")
+        ip = self._tt_field(u, "szIPAddress")
+        status = self._tt_field(u, "szStatusMsg")
+        lines = ["Пользователь: %s" % nick]
+        if uname:
+            lines.append("Username: %s" % uname)
+        if status:
+            lines.append("Статус: %s" % status[:50])
+        if ip:
+            lines.append("IP: %s" % ip)
+        kb = [[{"text": "✉ Написать ЛС", "callback_data": "online:msg:%s" % uid}]]
+        if not (int(getattr(u, "uUserType", 0) or 0) & 2):  # админов кикать/банить нельзя
+            kb.append([{"text": "Кикнуть", "callback_data": "kick:do:%s" % uid},
+                       {"text": "Забанить", "callback_data": "ban:do:%s" % uid}])
+        kb.append([{"text": "← Назад", "callback_data": "online:list"}])
+        return "\n".join(lines), kb
+
     def _unban_view(self):
         """Список записей банов из bans.json с кнопками разбана."""
         if not self.bans:
@@ -874,6 +933,27 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._tg_edit_kb(cid, mid, text, kb)
             else:
                 self._tg_answer_cb(qid, "Не подписчик.", alert=True)
+            return
+        if data == "online:list":
+            self._tg_answer_cb(qid)
+            text, kb = self._online_view()
+            self._tg_edit_kb(cid, mid, text, kb)
+            return
+        if data.startswith("online:view:"):
+            self._tg_answer_cb(qid)
+            uid = int(data.split(":", 2)[2])
+            text, kb = self._user_view(uid)
+            self._tg_edit_kb(cid, mid, text, kb)
+            return
+        if data.startswith("online:msg:"):
+            uid = int(data.split(":", 2)[2])
+            u = self.users.get(uid)
+            nick = (self._tt_field(u, "szNickname") or self._tt_field(u, "szUsername")
+                    or "id %s" % uid) if u else "id %s" % uid
+            self._pending_msg = {"cid": cid, "uid": uid, "nick": nick}
+            self._tg_answer_cb(qid, "Напиши текст сообщения.")
+            self._tg_send_text(cid, "Напиши текст для %s — отправлю ему в TeamTalk "
+                                      "личным сообщением. Отмена — любая команда со слэшем." % nick)
             return
         if data.startswith("kick:do:"):
             target = int(data.split(":", 2)[2])
@@ -2326,21 +2406,6 @@ class MusicBot(TeamTalk5.TeamTalk):
             lines = ["Ничего не играет."]
         lines.append("Отправь h — справка по командам.")
         self._send("\n".join(lines))
-
-    def _online_text(self):
-        """Кто сейчас на сервере (nickname/username, без самого бота)."""
-        users = []
-        for uid, u in list(self.users.items()):
-            if uid == self.my_user_id:
-                continue
-            nick = self._tt_field(u, "szNickname") or self._tt_field(u, "szUsername")
-            if nick:
-                users.append(nick)
-        users = sorted(set(users))
-        server = self._server_name()
-        if not users:
-            return "Сейчас на сервере «%s» никого, кроме меня." % server
-        return "Сейчас на сервере «%s» (%d):\n%s" % (server, len(users), ", ".join(users))
 
     def _help_cmd(self):
         self._send(
