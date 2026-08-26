@@ -2870,9 +2870,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 text = "%s покинул сервер %s" % (nick, self._server_name())
             if TG_NOTIFY_CHAT_ID:
                 self._tg_send_notify(text, TG_NOTIFY_CHAT_ID)
-            for cid, rec in list(self.sub_active.items()):
-                if rec.get("username") and str(rec["username"]).lower() == uname:
-                    continue  # не анонсируем подписчику его собственный вход/выход
+            for cid in list(self.sub_active):
                 self._tg_send_notify(text, int(cid))
         except Exception as e:
             log("notify join/leave err: %s" % str(e)[:150])
