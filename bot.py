@@ -718,9 +718,9 @@ class MusicBot(TeamTalk5.TeamTalk):
         lines = ["Подписчики (%d):" % len(items)]
         kb = []
         for cid, rec in items:
-            nick = rec.get("nick") or rec.get("username") or "?"
-            kb.append([{"text": "%s (id %s)" % (nick, cid),
-                        "callback_data": "subs:view:%s" % cid}])
+            name = (rec.get("tg_name") or rec.get("tg_username")
+                    or rec.get("nick") or rec.get("username") or "id %s" % cid)
+            kb.append([{"text": name, "callback_data": "subs:view:%s" % cid}])
         if items:
             lines.append("Нажми на подписчика — откроются действия.")
         else:
@@ -730,11 +730,12 @@ class MusicBot(TeamTalk5.TeamTalk):
     def _subs_view(self, cid, actor_uid):
         """Карточка подписчика: статус и кнопки действий."""
         rec = self.sub_active.get(str(cid)) or {}
-        nick = rec.get("nick") or rec.get("username") or "?"
+        name = (rec.get("tg_name") or rec.get("tg_username")
+                or rec.get("nick") or rec.get("username") or "id %s" % cid)
         is_admin = int(cid) in self.admins
         is_owner = str(cid) == str(TG_OWNER_USER_ID)
         lines = [
-            "Подписчик: %s" % nick,
+            "Подписчик: %s" % name,
             "ID: %s" % cid,
         ]
         if rec.get("subscribed_at"):
@@ -939,6 +940,22 @@ class MusicBot(TeamTalk5.TeamTalk):
         cid = (msg.get("chat") or {}).get("id")
         if not cid:
             return
+        # запоминаем, как человек записан в Telegram (first_name + last_name) —
+        # показываем это имя в списке подписчиков вместо user ID
+        fr = msg.get("from") or {}
+        tg_name = " ".join(filter(None, [fr.get("first_name") or "", fr.get("last_name") or ""])).strip()
+        tg_uname = fr.get("username") or ""
+        if str(cid) in self.sub_active:
+            rec = self.sub_active[str(cid)]
+            changed = False
+            if tg_name and rec.get("tg_name") != tg_name:
+                rec["tg_name"] = tg_name
+                changed = True
+            if tg_uname and rec.get("tg_username") != tg_uname:
+                rec["tg_username"] = tg_uname
+                changed = True
+            if changed:
+                self._save_subs()
         low = text.lower()
         if low == "/unsub":
             if str(cid) in self.sub_active:
@@ -959,6 +976,10 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._tg_send_text(cid, "Ссылка недействительна или истекла. Отправь /sub заново на сервере.")
             return
         rec["subscribed_at"] = time.time()
+        if tg_name:
+            rec["tg_name"] = tg_name
+        if tg_uname:
+            rec["tg_username"] = tg_uname
         self.sub_active[str(cid)] = rec
         self._save_subs()
         who = rec.get("nick") or rec.get("username") or "твой аккаунт"
@@ -987,8 +1008,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             "Музыку заказывает любой, управление ботом — только админам."
         )
         if is_admin:
-            text += ("\nДля админов: /admins, /admin <id>, /unadmin <id>, /subs, /delsub <id>, "
-                      "/kick, /ban, /unban")
+            text += ("\nДля админов: /admins, /subs, /kick, /ban, /unban. "
+                      "Админов и подписки можно менять в /subs (кнопки).")
         return text
 
     def _tg_is_admin_msg(self, msg):
@@ -1007,7 +1028,6 @@ class MusicBot(TeamTalk5.TeamTalk):
         public = [
             {"command": "help", "description": "Список команд"},
             {"command": "start", "description": "Подписка по ссылке / старт"},
-            {"command": "unsub", "description": "Отписаться от уведомлений"},
             {"command": "play", "description": "Поиск и игра: /play <запрос>"},
             {"command": "online", "description": "Кто сейчас на сервере"},
             {"command": "next", "description": "Следующий трек"},
@@ -1016,12 +1036,12 @@ class MusicBot(TeamTalk5.TeamTalk):
             {"command": "favorites", "description": "Избранное: /favorites"},
             {"command": "radio", "description": "Радиостанции"},
         ]
+        # /admin, /unadmin, /delsub, /unsub намеренно НЕ в меню: назначение/снятие
+        # админа и отписка делаются в списке подписчиков /subs (кнопки). По тексту
+        # команды продолжают работать.
         admin = [
             {"command": "admins", "description": "Список админов бота"},
-            {"command": "admin", "description": "Назначить админа: /admin <id>"},
-            {"command": "unadmin", "description": "Снять админа: /unadmin <id>"},
-            {"command": "subs", "description": "Список подписчиков"},
-            {"command": "delsub", "description": "Убрать подписку: /delsub <id>"},
+            {"command": "subs", "description": "Подписчики: админы, отписка"},
             {"command": "kick", "description": "Кикнуть пользователя"},
             {"command": "ban", "description": "Забанить пользователя"},
             {"command": "unban", "description": "Разбанить: /unban"},
