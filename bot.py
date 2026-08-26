@@ -2995,14 +2995,15 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("welcome join err: %s" % str(e)[:150])
 
     def _welcome_do(self, nick, ip):
-        """Гео-резолв и отправка приветствия в канал (в фоне, не блокирует событийный цикл)."""
+        """Гео-резолв и отправка приветствия сетевым сообщением (всем на сервере,
+        в любом канале). В фоне — не блокирует событийный цикл."""
         try:
             geo = self._ip_geo(ip)
             text = "👋 Привет, %s! Добро пожаловать на сервер %s." % (nick, self._server_name())
             if ip:
                 text += "\nIP: %s%s" % (ip, (" (%s)" % geo) if geo else "")
             text += "\n%s" % (WELCOME_RULES or "Ознакомься, пожалуйста, с правилами сервера.")
-            self._send_channel_announce(text)
+            self._send_network_msg(text)
         except Exception as e:
             log("welcome do err: %s" % str(e)[:150])
 
