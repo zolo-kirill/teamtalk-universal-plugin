@@ -666,6 +666,15 @@ class MusicBot(TeamTalk5.TeamTalk):
                 text, kb = self._unban_view()
                 self._tg_send_kb(cid, text, kb)
                 return
+            if low.startswith("/net ") or low == "/net" or low.startswith("/broadcast ") or low == "/broadcast":
+                body = text.split(" ", 1)[1].strip() if " " in text else ""
+                if not body:
+                    self._tg_send_text(cid, "Формат: /net <текст> — сетевое сообщение всем на сервере.")
+                elif self._send_network_msg(body):
+                    self._tg_send_text(cid, "Сетевое сообщение отправлено всем на сервере.")
+                else:
+                    self._tg_send_text(cid, "Не отправилось: у учётки бота нет права на сетевые сообщения.")
+                return
             prev = self.reply_user_id
             self.reply_user_id = 0
             self._tg_reply_chat = (msg.get("chat") or {}).get("id")
@@ -1125,6 +1134,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             {"command": "kick", "description": "Кикнуть пользователя"},
             {"command": "ban", "description": "Забанить пользователя"},
             {"command": "unban", "description": "Разбанить: /unban"},
+            {"command": "net", "description": "Сетевое сообщение всем: /net <текст>"},
         ]
         try:
             # общее меню по умолчанию — без админских команд
@@ -2642,6 +2652,19 @@ class MusicBot(TeamTalk5.TeamTalk):
             return True
         except Exception as e:
             log("send to tt user %d err: %s" % (uid, str(e)[:150]))
+            return False
+
+    def _send_network_msg(self, text):
+        """Отправить сетевое сообщение (broadcast) всем подключённым на сервере."""
+        if not self.logged_in or not text:
+            return False
+        try:
+            msgs = buildTextMessage(text, TextMsgType.MSGTYPE_BROADCAST, 0)
+            for m in msgs:
+                self.doTextMessage(m)
+            return True
+        except Exception as e:
+            log("send network msg err: %s" % str(e)[:150])
             return False
 
     def _is_tt_command(self, text):
