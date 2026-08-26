@@ -2848,6 +2848,17 @@ class MusicBot(TeamTalk5.TeamTalk):
             pass
         return "TeamTalk"
 
+    # Пол в статус-режиме (nStatusMode): бит 0x100 — женский, 0x1000 — нейтральный (TeamTalk).
+    _STATUSMODE_GENDER_MASK = 0x1100
+    _STATUSMODE_FEMALE = 0x0100
+
+    def _user_female(self, user):
+        """True, если у пользователя в статус-режиме стоит женский пол."""
+        try:
+            return (user.nStatusMode & self._STATUSMODE_GENDER_MASK) == self._STATUSMODE_FEMALE
+        except Exception:
+            return False
+
     def _notify_join_leave(self, sign, user):
         """Announce a user logging in (+)/out (-): владельцу и всем подписчикам."""
         try:
@@ -2864,10 +2875,11 @@ class MusicBot(TeamTalk5.TeamTalk):
             uname = self._tt_field(user, "szUsername").lower()
             if uname in TG_NOTIFY_IGNORE:
                 return
+            female = self._user_female(user)
             if sign == "+":
-                text = "%s присоединился к серверу %s" % (nick, self._server_name())
+                text = "%s %s к серверу %s" % (nick, "присоединилась" if female else "присоединился", self._server_name())
             else:
-                text = "%s покинул сервер %s" % (nick, self._server_name())
+                text = "%s %s сервер %s" % (nick, "покинула" if female else "покинул", self._server_name())
             if TG_NOTIFY_CHAT_ID:
                 self._tg_send_notify(text, TG_NOTIFY_CHAT_ID)
             for cid in list(self.sub_active):
