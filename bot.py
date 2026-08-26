@@ -123,6 +123,10 @@ TG_NOTIFY_SERVER = str(_cfg("telegram_relay.notify_server_name", "TG_NOTIFY_SERV
 TG_NOTIFY_IGNORE = {u.strip().lower() for u in (_cfg("telegram_relay.ignore_users", None, []) or []) if u.strip()}
 TG_NOTIFY_IGNORE.add("bot_admin")  # все боты на одной админ-учётке — их не анонсируем
 
+# Приветствие при входе пользователя на сервер: просьба ознакомиться с правилами
+# (welcome.rules_text в config.json; пусто — стандартная строка).
+WELCOME_RULES = str(_cfg("welcome.rules_text", None, "") or "").strip()
+
 # Отдельный Telegram-бот для музыки: подписчики (sub mus) получают играющие треки.
 # Пусто — музыкальный бот не подключён (sub mus отвечает, что не настроен).
 TG_MUSIC_TOKEN = str(_cfg("telegram_relay.music_token", "TG_MUSIC_TOKEN", "")).strip()
@@ -2955,12 +2959,60 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception as e:
             log("notify join/leave err: %s" % str(e)[:150])
 
+    def _ip_geo(self, ip):
+        """Страна и город по IP через ip-api.com (бесплатный эндпоинт, без ключа)."""
+        try:
+            if not ip or ip in ("0.0.0.0", "::", "::1", "127.0.0.1", "localhost"):
+                return ""
+            url = "http://ip-api.com/json/%s?fields=status,country,city" % ip
+            with urllib.request.urlopen(url, timeout=5) as r:
+                data = json.loads(r.read().decode("utf-8", "ignore"))
+            if data.get("status") != "success":
+                return ""
+            return ", ".join(p for p in (data.get("country") or "", data.get("city") or "") if p)
+        except Exception as e:
+            log("ip geo err: %s" % str(e)[:100])
+            return ""
+
+    def _welcome_join(self, user):
+        """При входе пользователя на сервер — приветствие с ником, IP и гео в канал TeamTalk."""
+        try:
+            if not self.logged_in or not user or not self.my_channel_id:
+                return
+            if user.nUserID == self.my_user_id:
+                return
+            if not self._ready_time or time.time() - self._ready_time < 3:
+                return
+            nick = self._tt_field(user, "szNickname") or self._tt_field(user, "szUsername")
+            if not nick:
+                return
+            uname = self._tt_field(user, "szUsername").lower()
+            if uname in TG_NOTIFY_IGNORE:
+                return
+            ip = self._tt_field(user, "szIPAddress") or ""
+            threading.Thread(target=self._welcome_do, args=(nick, ip), daemon=True).start()
+        except Exception as e:
+            log("welcome join err: %s" % str(e)[:150])
+
+    def _welcome_do(self, nick, ip):
+        """Гео-резолв и отправка приветствия в канал (в фоне, не блокирует событийный цикл)."""
+        try:
+            geo = self._ip_geo(ip)
+            text = "👋 Привет, %s! Добро пожаловать на сервер %s." % (nick, self._server_name())
+            if ip:
+                text += "\nIP: %s%s" % (ip, (" (%s)" % geo) if geo else "")
+            text += "\n%s" % (WELCOME_RULES or "Ознакомься, пожалуйста, с правилами сервера.")
+            self._send_channel_announce(text)
+        except Exception as e:
+            log("welcome do err: %s" % str(e)[:150])
+
     def onCmdUserLoggedIn(self, user):
         try:
             self.users[user.nUserID] = user
         except Exception:
             pass
         self._notify_join_leave("+", user)
+        self._welcome_join(user)
 
     def onCmdUserLoggedOut(self, user):
         try:

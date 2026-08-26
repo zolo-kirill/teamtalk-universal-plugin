@@ -53,6 +53,9 @@
         "ignore_users": [],
         "music_token": ""
     },
+    "welcome": {
+        "rules_text": ""
+    },
     "logger": {
         "log": true,
         "level": "INFO",
