@@ -837,6 +837,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             self.admins.append(int(target))
             self._save_admins()
             self._tg_register_commands()
+            self._tg_notify_promoted(int(target))
             self._tg_answer_cb(qid, "Админ назначен.")
             text, kb = self._subs_view(target, actor)
             self._tg_edit_kb(cid, mid, text, kb)
@@ -2609,7 +2610,13 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.admins.append(aid)
         self._save_admins()
         self._tg_register_commands()
+        self._tg_notify_promoted(aid)
         self._tg_send_text(cid, "✅ Админ назначен: %s (users.db обновлён)." % aid)
+
+    def _tg_notify_promoted(self, aid):
+        """Уведомить в Telegram человека, которого только что назначили админом."""
+        self._tg_send_text(aid, "Тебя назначили админом бота. Теперь доступны "
+                                "админские команды: /admins, /subs, /admin, /unadmin, /delsub.")
 
     def _tg_unadmin_cmd(self, msg, text):
         """/unadmin <user_id> — снять админа (только владелец)."""
