@@ -679,6 +679,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             self.reply_user_id = 0
             self._tg_reply_chat = (msg.get("chat") or {}).get("id")
             try:
+                self._announce_tg_cmd(msg, text)
                 self._handle_cmd(text, 0)
             except Exception as e:
                 log("tg cmd err: %s" % e)
@@ -2081,6 +2082,73 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._send("📻 ▶ %s" % title)
         self._set_status("Radio: %s" % title)
         self._start_voice(url, 0)
+
+    # Команды-«запросы», которые при приходе из Telegram объявляются в канале TeamTalk.
+    _TG_KNOWN_CMDS = frozenset([
+        "v", "громкость", "громко", "volume", "sf", "sub", "cm", "vo",
+        "rs", "рестарт", "restart", "перезагрузка", "sv", "svc", "сервис",
+        "cn", "cs", "с", "s", "стоп", "останови", "stop", "скип", "дальше",
+        "след", "следующий", "skip", "очередь", "queue", "q", "статус",
+        "status", "now", "dl", "скачать", "download",
+        "lf", "файл", "локальный", "n", "н", "next",
+        "b", "back", "назад", "пл", "список", "плейлист", "радио", "radio",
+        "r", "f", "пи", "pi", "play", "плей", "играй", "п", "p", "channel",
+        "u", "ссылка", "link", "url", "найди",
+    ])
+
+    def _is_known_cmd(self, text):
+        """Первый токен (со слешем или без) — известная команда бота."""
+        t = (text or "").strip()
+        if not t:
+            return False
+        if t.startswith("/"):
+            t = t[1:]
+        return t.split(None, 1)[0].lower() in self._TG_KNOWN_CMDS
+
+    def _tg_cmd_author(self, msg):
+        """Имя автора команды из Telegram: first_name + last_name, иначе username."""
+        frm = msg.get("from") or {}
+        name = " ".join(x for x in (frm.get("first_name") or "", frm.get("last_name") or "") if x).strip()
+        return name or frm.get("username") or "Telegram"
+
+    def _tg_cmd_female(self, msg):
+        """True, если автор команды — подписчик, чей пол в TeamTalk женский."""
+        try:
+            cid = (msg.get("from") or {}).get("id")
+            for sid, info in self.sub_active.items():
+                if str(sid) == str(cid):
+                    uname = (info.get("username") or "").lower()
+                    for u in self.users.values():
+                        if (self._tt_field(u, "szUsername") or "").lower() == uname:
+                            return self._user_female(u)
+        except Exception:
+            pass
+        return False
+
+    def _send_channel_announce(self, text):
+        """Служебное сообщение в текущий канал TeamTalk (без зеркала в Telegram)."""
+        try:
+            if self.my_channel_id:
+                msgs = buildTextMessage(text, TextMsgType.MSGTYPE_CHANNEL, nChannelID=self.my_channel_id)
+                for m in msgs:
+                    self.doTextMessage(m)
+                log("channel announce: %s" % text[:100])
+        except Exception as e:
+            log("channel announce err: %s" % str(e)[:150])
+
+    def _announce_tg_cmd(self, msg, text):
+        """Команда из Telegram объявляется в канале: «Кирилл запросил: радио ремикс FM»."""
+        try:
+            if not self._is_known_cmd(text):
+                return
+            author = self._tg_cmd_author(msg)
+            verb = "запросила" if self._tg_cmd_female(msg) else "запросил"
+            body = (text or "").strip()
+            if body.startswith("/"):
+                body = body[1:]
+            self._send_channel_announce("%s %s: %s" % (author, verb, body))
+        except Exception as e:
+            log("announce tg cmd err: %s" % str(e)[:150])
 
     def _handle_cmd(self, text, from_user):
         text = text.strip()
