@@ -17,6 +17,8 @@ import traceback
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from ctypes import byref
 
@@ -96,6 +98,7 @@ DEFAULT_SERVICE = str(_cfg("general.default_service", None, "yt"))
 DEFAULT_CHANNEL_MSG = bool(_cfg("general.send_channel_messages", None, True))
 START_COMMANDS = list(_cfg("general.start_commands", None, []))
 CLIENTNAME = "teamtalk-universal-plugin"
+CONNECT_TIMEOUT = int(_cfg("general.connect_timeout_sec", None, 20))
 
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -227,6 +230,27 @@ def _restart_bot_soon():
     os._exit(0)
 
 
+def _nightly_restart_delay(tzname="Europe/Moscow", hour=3, minute=0):
+    """Секунды до ближайшего ночного перезапуска (по московскому времени)."""
+    now = datetime.now(ZoneInfo(tzname))
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+def _start_nightly_restart():
+    """Daemon-поток: перезапуск бота каждую ночь в 03:00 МСК."""
+    def loop():
+        while True:
+            delay = _nightly_restart_delay()
+            log("nightly restart in %.0fs" % delay)
+            time.sleep(delay)
+            log("nightly restart")
+            _restart_bot_soon()
+    threading.Thread(target=loop, daemon=True).start()
+
+
 class MusicBot(TeamTalk5.TeamTalk):
     def __init__(self):
         super().__init__()
@@ -245,6 +269,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.playing = False
         self.downloading = set()
         self.reconnect = True
+        self.connected = False
         self._last_err_sent = 0
         self.paused = False
         self.volume = min(DEFAULT_VOLUME, MAX_VOLUME)
@@ -2517,6 +2542,7 @@ class MusicBot(TeamTalk5.TeamTalk):
     # ----- events ----------------------------------------------------
     def onConnectSuccess(self):
         log("connected, logging in")
+        self.connected = True
         self._login()
 
     def onConnectFailed(self):
@@ -2525,6 +2551,7 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def onConnectionLost(self):
         log("connection lost; exiting for restart")
+        self.connected = False
         self.playing = False
         self.logged_in = False
         self.joined = False
@@ -3201,6 +3228,16 @@ class MusicBot(TeamTalk5.TeamTalk):
             except Exception as e:
                 log("connect exception: %s\n%s" % (e, traceback.format_exc()))
                 time.sleep(10)
+        # The SDK's connect is async and sometimes stalls with no result
+        # event (TCP established, handshake never completes). Watchdog:
+        # if not connected within 20s, exit and let systemd relaunch.
+        deadline = time.monotonic() + CONNECT_TIMEOUT
+        while self.reconnect and not self.connected:
+            self.runEventLoop(100)
+            if time.monotonic() > deadline:
+                log("connect watchdog timeout; exiting for restart")
+                threading.Thread(target=_restart_bot_soon, daemon=True).start()
+                return
         while self.reconnect:
             try:
                 self._run_once()
@@ -3214,6 +3251,7 @@ class MusicBot(TeamTalk5.TeamTalk):
 def main():
     bot = MusicBot()
     log("starting music bot for %s:%d (user %s)" % (HOST, TCP_PORT, USERNAME))
+    _start_nightly_restart()
     bot.run()
 
 
