@@ -223,7 +223,7 @@ def _fmt_ms(ms):
 def _restart_bot_soon():
     """Exit the process shortly; the service supervisor (restart=always) relaunches."""
     time.sleep(1.5)
-    log("restarting by command")
+    log("exiting for restart")
     os._exit(0)
 
 
@@ -245,7 +245,6 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.playing = False
         self.downloading = set()
         self.reconnect = True
-        self.connecting = False
         self._last_err_sent = 0
         self.paused = False
         self.volume = min(DEFAULT_VOLUME, MAX_VOLUME)
@@ -2521,15 +2520,18 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._login()
 
     def onConnectFailed(self):
-        log("connect failed")
-        self._schedule_reconnect()
+        log("connect failed; exiting for restart")
+        threading.Thread(target=_restart_bot_soon, daemon=True).start()
 
     def onConnectionLost(self):
-        log("connection lost")
+        log("connection lost; exiting for restart")
         self.playing = False
         self.logged_in = False
         self.joined = False
-        self._schedule_reconnect()
+        # In-process reconnect (self.connect) hangs without firing a result
+        # event, so exit and let systemd Restart=always launch a fresh process;
+        # run.sh waits for the tt5 TCP port before starting bot.py.
+        threading.Thread(target=_restart_bot_soon, daemon=True).start()
 
     def onCmdMyselfLoggedOut(self):
         log("logged out")
@@ -3099,14 +3101,6 @@ class MusicBot(TeamTalk5.TeamTalk):
     def _login(self):
         self.doLogin(self.nickname, USERNAME, PASSWORD, CLIENTNAME)
 
-    def _schedule_reconnect(self):
-        if not self.reconnect:
-            return
-        def do_reconnect():
-            time.sleep(10)
-            self.api_q.put(("reconnect",))
-        threading.Thread(target=do_reconnect, daemon=True).start()
-
     def _run_once(self):
         self.runEventLoop(50)
         while True:
@@ -3196,12 +3190,6 @@ class MusicBot(TeamTalk5.TeamTalk):
                 elif kind == "restart":
                     _, path, offset = item
                     self._start_voice(path, int(offset))
-                elif kind == "reconnect":
-                    if self.reconnect and not self.connecting:
-                        self.connecting = True
-                        log("reconnecting")
-                        self.connect(HOST, TCP_PORT, UDP_PORT)
-                        self.connecting = False
             except Exception as e:
                 log("api_q handler error: %s\n%s" % (e, traceback.format_exc()))
 
