@@ -168,6 +168,78 @@ class Registrar(object):
         except Exception as e:
             self.log("регистратор: answer err: %s" % str(e)[:200])
 
+    def _tg_send_document(self, chat_id, filename, content_bytes, caption=""):
+        boundary = "----TTRegBoundary" + uuid.uuid4().hex
+        lines = ["--" + boundary, 'Content-Disposition: form-data; name="chat_id"', "", str(chat_id)]
+        if caption:
+            lines += ["--" + boundary, 'Content-Disposition: form-data; name="caption"', "", caption]
+        lines += [
+            "--" + boundary,
+            'Content-Disposition: form-data; name="document"; filename="%s"' % filename,
+            "Content-Type: application/octet-stream",
+            "",
+        ]
+        body = ("\r\n".join(lines)).encode("utf-8") + b"\r\n" + content_bytes + \
+               ("\r\n--%s--\r\n" % boundary).encode("utf-8")
+        url = "https://api.telegram.org/bot%s/sendDocument" % self.token
+        req = urllib.request.Request(url, data=body, method="POST", headers={
+            "Content-Type": "multipart/form-data; boundary=%s" % boundary,
+        })
+        with urllib.request.urlopen(req, timeout=70) as r:
+            return json.loads(r.read().decode())
+
+    @staticmethod
+    def _xml_escape(value):
+        return (str(value)
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace('"', "&quot;")
+                .replace("'", "&apos;"))
+
+    def _tt_file_content(self, username, password):
+        """Файл .tt для входа на сервер (формат TeamTalk 5: XML с расширением .tt)."""
+        c = self.cfg
+        host = c.get("hostname", "")
+        tcp = c.get("tcp_port", 10333)
+        udp = c.get("udp_port", tcp)
+        name = "%s@%s:%s" % (username, host, tcp)
+        x = self._xml_escape
+        return ("<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n"
+                "<!DOCTYPE teamtalk>\n"
+                "<teamtalk version=\"5.0\">\n"
+                " <host>\n"
+                "  <name>%s</name>\n"
+                "  <address>%s</address>\n"
+                "  <tcpport>%s</tcpport>\n"
+                "  <udpport>%s</udpport>\n"
+                "  <encrypted>false</encrypted>\n"
+                "  <auth>\n"
+                "   <username>%s</username>\n"
+                "   <password>%s</password>\n"
+                "  </auth>\n"
+                "  <clientsetup>\n"
+                "   <nickname>%s</nickname>\n"
+                "  </clientsetup>\n"
+                " </host>\n"
+                "</teamtalk>\n") % (
+                    x(name), x(host), x(tcp), x(udp), x(username), x(password), x(username))
+
+    def _send_tt_file(self, req):
+        username = req.get("username")
+        password = req.get("password")
+        tg_user_id = req.get("tg_user_id")
+        if not username or not password or not tg_user_id:
+            return
+        try:
+            content = self._tt_file_content(username, password)
+            self._tg_send_document(
+                tg_user_id, username + ".tt", content.encode("utf-8"),
+                caption="Учётная запись TeamTalk. Логин: %s" % username)
+            self.log("регистратор: .tt файл отправлен %s (%s)" % (tg_user_id, username))
+        except Exception as e:
+            self.log("регистратор: не удалось отправить .tt: %s" % str(e)[:200])
+
     # ------------------------------------------------------------- telegram poll
     def _poller_loop(self):
         while not self.stop_evt.is_set():
@@ -257,8 +329,8 @@ class Registrar(object):
             return
         if text == "/start" and user_id == self.admin_id:
             self._tg_send(chat_id, "Ты администратор регистратора. Сюда будут приходить заявки на "
-                                   "регистрацию с кнопками «Принять» и «Отклонить». Пользователи подают "
-                                   "заявки через этого бота командой /register.")
+                                   "регистрацию от пользователей. Пользователи подают заявки через "
+                                   "этого бота командой /register.")
             return
         if text in ("/start", "/register"):
             self._start_register(chat_id, user_id, user)
@@ -274,15 +346,14 @@ class Registrar(object):
     # ------------------------------------------------------------ registration
     def _start_register(self, chat_id, user_id, user):
         if user_id == self.admin_id:
-            self._tg_send(chat_id, "Ты администратор — тебе не нужно регистрироваться. Заявки приходят сюда с кнопками «Принять» и «Отклонить».")
+            self._tg_send(chat_id, "Ты администратор — тебе не нужно регистрироваться. Заявки приходят сюда.")
             return
         if self._pending_for_user(user_id):
             self._tg_send(chat_id, "У тебя уже есть заявка на проверке. Жди решения администратора.")
             return
         self.conv[user_id] = {"step": "await_username"}
-        self._tg_send(chat_id, "Регистрация учётной записи на TeamTalk.\n"
-                               "Придумай логин: буквы, цифры, точка, дефис или подчёркивание, "
-                               "от 3 до 32 символов, без пробелов. Пришли его мне.")
+        self._tg_send(chat_id, "Здравствуйте! Пожалуйста, введите ваше имя пользователя: "
+                               "буквы, цифры, точка, дефис или подчёркивание, от 3 до 32 символов, без пробелов.")
 
     def _on_username(self, chat_id, user_id, text):
         name = text.strip()
@@ -294,8 +365,7 @@ class Registrar(object):
             self._tg_send(chat_id, "Этот логин уже занят другой заявкой. Выбери другой.")
             return
         self.conv[user_id] = {"step": "await_password", "username": name}
-        self._tg_send(chat_id, "Логин «%s» принят.\n"
-                               "Теперь придумай пароль: минимум 4 символа, без пробелов. Пришли его." % name)
+        self._tg_send(chat_id, "Теперь введите пароль: минимум 4 символа, без пробелов.")
 
     def _on_password(self, chat_id, user_id, text, user):
         pwd = text.strip()
@@ -461,9 +531,10 @@ class Registrar(object):
                 self._tg_send(req["tg_user_id"],
                               "Готово! Твоя учётная запись создана:\n"
                               "Логин: %s\n"
-                              "Сервер: %s:%s\n"
-                              "Можно подключаться к TeamTalk."
-                              % (req["username"], self.cfg["hostname"], self.cfg["tcp_port"]))
+                              "Файл для входа на сервер (.tt) пришёл отдельным сообщением — "
+                              "открой его в клиенте TeamTalk."
+                              % req["username"])
+            self._send_tt_file(req)
             self._archive(req_id, req, approved=True)
         else:
             req.pop("processing", None)
