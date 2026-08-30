@@ -140,7 +140,7 @@ TG_MUSIC_TOKEN = str(_cfg("telegram_relay.music_token", "TG_MUSIC_TOKEN", "")).s
 # модуль не запускается.
 REG_ENABLED = bool(_cfg("telegram_registration.enabled", None, False))
 REG_TOKEN = str(_cfg("telegram_registration.token", "TG_REG_TOKEN", "")).strip()
-REG_ADMIN_USER_ID = int(_cfg("telegram_registration.admin_user_id", None, 0) or 0)
+REG_ADMIN_USER_IDS = [int(x) for x in (_cfg("telegram_registration.admin_user_ids", None, []) or []) if x]
 REG_BROADCAST_TEXT = str(_cfg("telegram_registration.broadcast_text", None, "")).strip()
 REG_ADMIN_TT_USER = str(_cfg("telegram_registration.admin_username", "TEAMTALK_ADMIN_USER", "bot_admin")).strip()
 REG_ADMIN_TT_PASS = str(_cfg("telegram_registration.admin_password", "TEAMTALK_ADMIN_PASSWORD", "")).strip()
@@ -3264,12 +3264,12 @@ def main():
     bot = MusicBot()
     log("starting music bot for %s:%d (user %s)" % (HOST, TCP_PORT, USERNAME))
     _start_nightly_restart()
-    if REG_ENABLED and REG_TOKEN and REG_ADMIN_USER_ID:
+    if REG_ENABLED and REG_TOKEN and REG_ADMIN_USER_IDS:
         try:
             import tt_register
             bot._registrar = tt_register.start({
                 "token": REG_TOKEN,
-                "admin_user_id": REG_ADMIN_USER_ID,
+                "admin_user_ids": REG_ADMIN_USER_IDS,
                 "broadcast_text": REG_BROADCAST_TEXT,
                 "hostname": HOST,
                 "tcp_port": TCP_PORT,
