@@ -134,6 +134,18 @@ WELCOME_RULES = str(_cfg("welcome.rules_text", None, "") or "").strip()
 # Пусто — музыкальный бот не подключён (sub mus отвечает, что не настроен).
 TG_MUSIC_TOKEN = str(_cfg("telegram_relay.music_token", "TG_MUSIC_TOKEN", "")).strip()
 
+# Регистратор учётных записей TeamTalk (модуль tt_register.py): отдельный
+# Telegram-бот принимает заявки (логин + пароль), админ принимает/отклоняет,
+# при принятии бот создаёт учётку и шлёт сетевое сообщение. Пустой токен —
+# модуль не запускается.
+REG_ENABLED = bool(_cfg("telegram_registration.enabled", None, False))
+REG_TOKEN = str(_cfg("telegram_registration.token", "TG_REG_TOKEN", "")).strip()
+REG_ADMIN_USER_ID = int(_cfg("telegram_registration.admin_user_id", None, 0) or 0)
+REG_BROADCAST_TEXT = str(_cfg("telegram_registration.broadcast_text", None, "")).strip()
+REG_ADMIN_TT_USER = str(_cfg("telegram_registration.admin_username", "TEAMTALK_ADMIN_USER", "bot_admin")).strip()
+REG_ADMIN_TT_PASS = str(_cfg("telegram_registration.admin_password", "TEAMTALK_ADMIN_PASSWORD", "")).strip()
+REG_ADMIN_TT_NICK = str(_cfg("telegram_registration.admin_nickname", None, "регистратор")).strip()
+
 # Optional YouTube cookies to bypass bot-check on restricted videos.
 COOKIES = _cfg("services.yt.cookiefile_path", "TEAMTALK_COOKIES", None) or os.path.join(
     BASE_DIR, "..", ".secrets", "cookies.txt"
@@ -3252,6 +3264,28 @@ def main():
     bot = MusicBot()
     log("starting music bot for %s:%d (user %s)" % (HOST, TCP_PORT, USERNAME))
     _start_nightly_restart()
+    if REG_ENABLED and REG_TOKEN and REG_ADMIN_USER_ID:
+        try:
+            import tt_register
+            bot._registrar = tt_register.start({
+                "token": REG_TOKEN,
+                "admin_user_id": REG_ADMIN_USER_ID,
+                "broadcast_text": REG_BROADCAST_TEXT,
+                "hostname": HOST,
+                "tcp_port": TCP_PORT,
+                "udp_port": UDP_PORT,
+                "tt_username": REG_ADMIN_TT_USER,
+                "tt_password": REG_ADMIN_TT_PASS,
+                "tt_nickname": REG_ADMIN_TT_NICK,
+                "state_file": os.path.join(BASE_DIR, "register_requests.json"),
+                "log_fn": log,
+            })
+            if bot._registrar:
+                log("registrar: модуль регистрации запущен")
+            else:
+                log("registrar: пустой токен/админ — регистратор выключен")
+        except Exception as e:
+            log("registrar start error: %s" % e)
     bot.run()
 
 
