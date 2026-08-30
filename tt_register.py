@@ -110,9 +110,23 @@ class Registrar(object):
 
     # ------------------------------------------------------------- lifecycle
     def start(self):
+        self._set_commands()
         self._poller.start()
         self._core.start()
         self.log("регистратор: запущен (token %s…, admins %s)" % (self.token[:6], ",".join(map(str, self.admin_ids))))
+
+    def _set_commands(self):
+        commands = [
+            {"command": "register", "description": "Подать заявку на регистрацию"},
+        ]
+        if self.admin_ids:
+            commands.append({"command": "create", "description": "Создать учётную запись (админ)"})
+        try:
+            self._tg("setMyCommands", commands=json.dumps(commands))
+            self._tg("setChatMenuButton", menu_button=json.dumps({"type": "commands"}))
+            self.log("регистратор: команды зарегистрированы в Telegram")
+        except Exception as e:
+            self.log("регистратор: setMyCommands err: %s" % str(e)[:200])
 
     def stop(self):
         self.stop_evt.set()
