@@ -90,7 +90,7 @@ class Registrar(object):
         self.cfg = cfg
         self.log = log_fn
         self.token = cfg.get("token", "")
-        self.admin_id = int(cfg.get("admin_user_id", 0) or 0)
+        self.admin_ids = [int(x) for x in (cfg.get("admin_user_ids") or []) if x]
         self.state_file = cfg["state_file"]
         self.state = self._load_state()
         self.offset = int(self.state.get("tg_offset", 0) or 0)
@@ -112,7 +112,7 @@ class Registrar(object):
     def start(self):
         self._poller.start()
         self._core.start()
-        self.log("регистратор: запущен (token %s…, admin %s)" % (self.token[:6], self.admin_id))
+        self.log("регистратор: запущен (token %s…, admins %s)" % (self.token[:6], ",".join(map(str, self.admin_ids))))
 
     def stop(self):
         self.stop_evt.set()
@@ -327,10 +327,16 @@ class Registrar(object):
         text = (msg.get("text") or "").strip()
         if not text:
             return
-        if text == "/start" and user_id == self.admin_id:
+        if text == "/start" and user_id in self.admin_ids:
             self._tg_send(chat_id, "Ты администратор регистратора. Сюда будут приходить заявки на "
-                                   "регистрацию от пользователей. Пользователи подают заявки через "
-                                   "этого бота командой /register.")
+                                   "регистрацию от пользователей. Команда /create — создать учётную "
+                                   "запись самому. Пользователи подают заявки командой /register.")
+            return
+        if text == "/create":
+            if user_id in self.admin_ids:
+                self._start_create(chat_id, user_id)
+            else:
+                self._tg_send(chat_id, "Команда /create только для администратора.")
             return
         if text in ("/start", "/register"):
             self._start_register(chat_id, user_id, user)
@@ -341,11 +347,12 @@ class Registrar(object):
         elif step == "await_password":
             self._on_password(chat_id, user_id, text, user)
         else:
-            self._tg_send(chat_id, "Команда /register — подать заявку на регистрацию учётной записи на сервере TeamTalk.")
+            self._tg_send(chat_id, "Команда /register — подать заявку на регистрацию учётной записи "
+                                   "на сервере TeamTalk. Для администратора: /create.")
 
     # ------------------------------------------------------------ registration
     def _start_register(self, chat_id, user_id, user):
-        if user_id == self.admin_id:
+        if user_id in self.admin_ids:
             self._tg_send(chat_id, "Ты администратор — тебе не нужно регистрироваться. Заявки приходят сюда.")
             return
         if self._pending_for_user(user_id):
@@ -354,6 +361,12 @@ class Registrar(object):
         self.conv[user_id] = {"step": "await_username"}
         self._tg_send(chat_id, "Здравствуйте! Пожалуйста, введите ваше имя пользователя: "
                                "буквы, цифры, точка, дефис или подчёркивание, от 3 до 32 символов, без пробелов.")
+
+    def _start_create(self, chat_id, user_id):
+        self.conv[user_id] = {"step": "await_username", "creator": True}
+        self._tg_send(chat_id, "Создание учётной записи.\n"
+                               "Введи имя пользователя: буквы, цифры, точка, дефис или "
+                               "подчёркивание, от 3 до 32 символов, без пробелов.")
 
     def _on_username(self, chat_id, user_id, text):
         name = text.strip()
@@ -364,7 +377,8 @@ class Registrar(object):
         if self._username_pending(name):
             self._tg_send(chat_id, "Этот логин уже занят другой заявкой. Выбери другой.")
             return
-        self.conv[user_id] = {"step": "await_password", "username": name}
+        conv = self.conv.get(user_id, {})
+        self.conv[user_id] = {"step": "await_password", "username": name, "creator": conv.get("creator", False)}
         self._tg_send(chat_id, "Теперь введите пароль: минимум 4 символа, без пробелов.")
 
     def _on_password(self, chat_id, user_id, text, user):
@@ -377,6 +391,11 @@ class Registrar(object):
             self._tg_send(chat_id, "Начни с команды /register.")
             return
         username = conv["username"]
+        if conv.get("creator"):
+            self.conv[user_id] = {"step": "await_type", "username": username, "password": pwd}
+            self._tg_send(chat_id, "Создание учётной записи «%s».\nКем будет пользователь?"
+                          % username, reply_markup=self._type_kb())
+            return
         del self.conv[user_id]
         req_id = uuid.uuid4().hex[:12]
         self.state["requests"][req_id] = {
@@ -394,7 +413,7 @@ class Registrar(object):
         self._notify_admin_new(req_id)
 
     def _notify_admin_new(self, req_id):
-        if not self.admin_id:
+        if not self.admin_ids:
             return
         req = self.state["requests"].get(req_id)
         if not req:
@@ -405,7 +424,8 @@ class Registrar(object):
                 "Логин: %s\n"
                 "Telegram: %s %s\n"
                 "Что делаем?" % (req["username"], req["tg_name"], tg)).rstrip()
-        self._tg_send(self.admin_id, text, reply_markup=kb)
+        for admin_id in self.admin_ids:
+            self._tg_send(admin_id, text, reply_markup=kb)
 
     @staticmethod
     def _kb(req_id):
@@ -414,19 +434,37 @@ class Registrar(object):
             {"text": "Отклонить", "callback_data": "reject:%s" % req_id},
         ]]}
 
+    @staticmethod
+    def _type_kb():
+        return {"inline_keyboard": [[
+            {"text": "Администратор сервера", "callback_data": "type:admin"},
+            {"text": "Обычный пользователь", "callback_data": "type:default"},
+        ]]}
+
+    @staticmethod
+    def _retry_kb(req_id):
+        return {"inline_keyboard": [[
+            {"text": "Повторить", "callback_data": "retry:%s" % req_id},
+            {"text": "Отменить", "callback_data": "cancel:%s" % req_id},
+        ]]}
+
     # -------------------------------------------------------------- callbacks
     def _handle_callback(self, cb):
         user_id = cb.get("from", {}).get("id")
-        if user_id != self.admin_id:
+        if user_id not in self.admin_ids:
             self._tg_answer(cb.get("id"), "Эта кнопка не для тебя.")
             return
         data = cb.get("data", "")
         if ":" not in data:
             self._tg_answer(cb.get("id"))
             return
-        action, req_id = data.split(":", 1)
+        action, value = data.split(":", 1)
         chat_id = cb.get("message", {}).get("chat", {}).get("id")
         message_id = cb.get("message", {}).get("message_id")
+        if action == "type":
+            self._handle_type_choice(cb.get("id"), user_id, value, chat_id, message_id)
+            return
+        req_id = value
         req = self.state["requests"].get(req_id)
         if not req:
             self._tg_answer(cb.get("id"), "Заявка не найдена.")
@@ -438,7 +476,39 @@ class Registrar(object):
             self._accept(req_id, req, chat_id, message_id)
         elif action == "reject":
             self._reject(req_id, req, chat_id, message_id)
+        elif action == "retry":
+            self._accept(req_id, req, chat_id, message_id)
+        elif action == "cancel":
+            self._cancel(req_id, req, chat_id, message_id)
         self._tg_answer(cb.get("id"))
+
+    def _handle_type_choice(self, callback_id, user_id, value, chat_id, message_id):
+        conv = self.conv.pop(user_id, None)
+        if not conv or conv.get("step") != "await_type":
+            self._tg_answer(callback_id, "Диалог создания не найден. Начни с /create.")
+            return
+        username = conv["username"]
+        password = conv["password"]
+        is_admin = value == "admin"
+        req_id = uuid.uuid4().hex[:12]
+        self.state["requests"][req_id] = {
+            "username": username,
+            "password": password,
+            "tg_user_id": user_id,
+            "tg_name": "администратор",
+            "tg_username": "",
+            "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "status": "pending",
+            "processing": True,
+            "is_admin": is_admin,
+            "admin_created": True,
+        }
+        self.admin_ctx[req_id] = (chat_id, message_id)
+        self._save_state()
+        label = "администратора" if is_admin else "обычного пользователя"
+        self._tg_edit(chat_id, message_id, "Создаю учётную запись «%s» (%s)..." % (username, label))
+        self._issue_create(req_id, self.state["requests"][req_id], is_admin=is_admin)
+        self._tg_answer(callback_id)
 
     def _accept(self, req_id, req, chat_id, message_id):
         if req.get("processing"):
@@ -454,13 +524,22 @@ class Registrar(object):
         self.admin_ctx[req_id] = (chat_id, message_id)
         self._save_state()
         self._tg_edit(chat_id, message_id, "Создаю учётную запись «%s»..." % req["username"])
-        self._issue_create(req_id, req)
+        self._issue_create(req_id, req, is_admin=req.get("is_admin", False))
 
-    def _issue_create(self, req_id, req):
+    def _cancel(self, req_id, req, chat_id, message_id):
+        self.awaiting = {k: v for k, v in self.awaiting.items() if v != req_id}
+        self.pending_users.pop(req["username"].lower(), None)
+        self.create_deadlines.pop(req_id, None)
+        self.admin_ctx.pop(req_id, None)
+        self.state["requests"].pop(req_id, None)
+        self._save_state()
+        self._tg_edit(chat_id, message_id, "Создание учётной записи «%s» отменено." % req["username"])
+
+    def _issue_create(self, req_id, req, is_admin=False):
         ua = UserAccount()
         ua.szUsername = req["username"].encode("utf-8")
         ua.szPassword = req["password"].encode("utf-8")
-        ua.uUserType = UserType.USERTYPE_DEFAULT
+        ua.uUserType = UserType.USERTYPE_ADMIN if is_admin else UserType.USERTYPE_DEFAULT
         ua.uUserRights = 0
         ua.szInitChannel = b"/"
         try:
@@ -540,10 +619,11 @@ class Registrar(object):
             req.pop("processing", None)
             self._save_state()
             if admin:
+                kb = self._retry_kb(req_id) if req.get("admin_created") else self._kb(req_id)
                 self._tg_edit(admin[0], admin[1],
                               "Не удалось создать учётную запись «%s»: %s"
                               % (req["username"], err),
-                              self._kb(req_id))
+                              kb)
             self.log("регистратор: не удалось создать %s: %s" % (req["username"], err))
 
     def _broadcast_approved(self, username):
@@ -588,10 +668,10 @@ class Registrar(object):
 
 
 def start(cfg, log_fn=print):
-    """Запускает регистратор. cfg — dict с ключами token, admin_user_id,
+    """Запускает регистратор. cfg — dict с ключами token, admin_user_ids,
     hostname, tcp_port, udp_port, tt_username, tt_password, tt_nickname,
     broadcast_text, state_file. Возвращает Registrar или None."""
-    if not cfg or not cfg.get("token") or not cfg.get("admin_user_id"):
+    if not cfg or not cfg.get("token") or not cfg.get("admin_user_ids"):
         return None
     reg = Registrar(cfg, log_fn)
     reg.start()
