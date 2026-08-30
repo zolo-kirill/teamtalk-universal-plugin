@@ -53,6 +53,15 @@
         "ignore_users": [],
         "music_token": ""
     },
+    "telegram_registration": {
+        "enabled": false,
+        "token": "",
+        "admin_user_id": 0,
+        "broadcast_text": "Пользователь {username} зарегистрирован на сервере",
+        "admin_username": "bot_admin",
+        "admin_password": "",
+        "admin_nickname": "регистратор"
+    },
     "welcome": {
         "rules_text": ""
     },
