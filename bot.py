@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Music bot for TeamTalk: plays audio from URLs into a voice channel."""
+"""Универсальный плагин для TeamTalk-сервера: музыка в голосовой канал,
+реле сообщений и файлов в Telegram, защита от ботнетов, регистрация учёток."""
 import array
 import ctypes
 import json
@@ -72,13 +73,13 @@ def _is_botnet_nick(nick):
 # Гости могут вписать в «ник» целую простыню/оскорбление и светить её в списке
 # пользователей. Слишком длинный или нецензурный ник режем киком + баном IP,
 # не дожидаясь гео (российский IP фильтр стран не ловит). Нормальный ник всегда
-# короче 40 символов — порог настраивается в protection.nick_max_len (0 = выкл).
+# короче 40 символов — порог настраивается в guard.max_nick_len (0 = выкл).
 _DEFAULT_NICK_MAX_LEN = 40
 
 # Корни мата (после нормализации ё->е и lower). Подбор консервативный: только
 # однозначные обсценные корни, чтобы «хулиган», «лебедь», «мудрый», «херсон»
 # (слова с похожими подстроками) НЕ ловились. Настраивается в
-# protection.mat_words (свой список вместо встроенного).
+# guard.mat_words (свой список вместо встроенного).
 _DEFAULT_MAT_ROOTS = (
     "пизд", "хуй", "хуе", "хуя", "бля", "еба", "ебл", "ебн", "ебок",
     "заеб", "наеб", "поеб", "говн", "гандон", "залуп", "шлюх", "дроч",
@@ -99,8 +100,9 @@ def _compile_mat_re(words):
     return re.compile("|".join(pats))
 
 
-# ---- config: JSON file in the TtMediaBot style ----
-# config.json (gitignored) overrides config_default.json; env vars are a fallback.
+# ---- конфиг: config_default.json (эталон) + config.json (правки сервера) ----
+# config.json в .gitignore и перекрывает config_default.json; env-переменные —
+# фолбэк на случай, когда ключа нет ни в одном из файлов.
 def _deep_merge(base, over):
     out = dict(base or {})
     for k, v in (over or {}).items():
@@ -163,21 +165,21 @@ def _save_config(patch):
     os.replace(tmp, CONFIG_PATH)
 
 
-HOST = str(_cfg("teamtalk.hostname", "TEAMTALK_HOST", "example.com"))
-TCP_PORT = int(_cfg("teamtalk.tcp_port", "TEAMTALK_TCP_PORT", 10333))
-UDP_PORT = int(_cfg("teamtalk.udp_port", "TEAMTALK_UDP_PORT", 10333))
-NICKNAME = str(_cfg("teamtalk.nickname", "TEAMTALK_NICKNAME", "UniversalBot"))
-USERNAME = str(_cfg("teamtalk.username", "TEAMTALK_USERNAME", "example"))
-PASSWORD = str(_cfg("teamtalk.password", "TEAMTALK_PASSWORD", ""))
-CHANNEL = str(_cfg("teamtalk.channel", "TEAMTALK_CHANNEL", ""))  # empty = root channel
-CHANNEL_PASSWORD = str(_cfg("teamtalk.channel_password", "TEAMTALK_CHANNEL_PASSWORD", ""))
-DEFAULT_VOLUME = int(_cfg("player.default_volume", None, 10))
-MAX_VOLUME = int(_cfg("player.max_volume", None, 100))
-DEFAULT_SERVICE = str(_cfg("general.default_service", None, "yt"))
-DEFAULT_CHANNEL_MSG = bool(_cfg("general.send_channel_messages", None, True))
-START_COMMANDS = list(_cfg("general.start_commands", None, []))
+HOST = str(_cfg("server.host", "TEAMTALK_HOST", "example.com"))
+TCP_PORT = int(_cfg("server.tcp_port", "TEAMTALK_TCP_PORT", 10333))
+UDP_PORT = int(_cfg("server.udp_port", "TEAMTALK_UDP_PORT", 10333))
+NICKNAME = str(_cfg("server.nickname", "TEAMTALK_NICKNAME", "UniversalBot"))
+USERNAME = str(_cfg("server.username", "TEAMTALK_USERNAME", "example"))
+PASSWORD = str(_cfg("server.password", "TEAMTALK_PASSWORD", ""))
+CHANNEL = str(_cfg("server.channel", "TEAMTALK_CHANNEL", ""))  # empty = root channel
+CHANNEL_PASSWORD = str(_cfg("server.channel_password", "TEAMTALK_CHANNEL_PASSWORD", ""))
+DEFAULT_VOLUME = int(_cfg("playback.default_volume", None, 10))
+MAX_VOLUME = int(_cfg("playback.max_volume", None, 100))
+DEFAULT_SERVICE = str(_cfg("runtime.main_service", None, "yt"))
+DEFAULT_CHANNEL_MSG = bool(_cfg("runtime.send_to_channel", None, True))
+START_COMMANDS = list(_cfg("runtime.startup_commands", None, []))
 CLIENTNAME = "teamtalk-universal-plugin"
-CONNECT_TIMEOUT = int(_cfg("general.connect_timeout_sec", None, 20))
+CONNECT_TIMEOUT = int(_cfg("server.connect_timeout_sec", None, 20))
 
 CACHE_DIR = os.path.join(BASE_DIR, "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -197,11 +199,11 @@ REPLY_TTL_SEC = 3600  # сколько можно ответить на пере
 MUSIC_SUBS_FILE = os.path.join(BASE_DIR, "music_subs.json")  # подписчики на музыку в Telegram
 MUSIC_SUB_TTL_SEC = 86400  # сколько живёт ссылка подписки на музыку (24 ч)
 
-TG_TOKEN = str(_cfg("telegram_relay.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
-TG_OWNER_USER_ID = int(_cfg("telegram_relay.owner_user_id", "TG_OWNER_USER_ID", 0) or 0)  # only this user can send commands
-TG_NOTIFY_CHAT_ID = int(_cfg("telegram_relay.notify_chat_id", "TG_NOTIFY_CHAT_ID", 0) or 0)  # сюда слать вход/выход пользователей (0 = выкл)
-TG_NOTIFY_SERVER = str(_cfg("telegram_relay.notify_server_name", "TG_NOTIFY_SERVER_NAME", "")).strip()  # пусто = брать имя сервера из TeamTalk
-TG_NOTIFY_IGNORE = {u.strip().lower() for u in (_cfg("telegram_relay.ignore_users", None, []) or []) if u.strip()}
+TG_TOKEN = str(_cfg("telegram.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
+TG_OWNER_USER_ID = int(_cfg("telegram.owner_user_id", "TG_OWNER_USER_ID", 0) or 0)  # only this user can send commands
+TG_NOTIFY_CHAT_ID = int(_cfg("telegram.notify_chat_id", "TG_NOTIFY_CHAT_ID", 0) or 0)  # сюда слать вход/выход пользователей (0 = выкл)
+TG_NOTIFY_SERVER = str(_cfg("telegram.server_display_name", "TG_NOTIFY_SERVER_NAME", "")).strip()  # пусто = брать имя сервера из TeamTalk
+TG_NOTIFY_IGNORE = {u.strip().lower() for u in (_cfg("telegram.ignore_usernames", None, []) or []) if u.strip()}
 TG_NOTIFY_IGNORE.add("bot_admin")  # все боты на одной админ-учётке — их не анонсируем
 
 # Приветствие при входе пользователя на сервер: просьба ознакомиться с правилами
@@ -210,19 +212,19 @@ WELCOME_RULES = str(_cfg("welcome.rules_text", None, "") or "").strip()
 
 # Отдельный Telegram-бот для музыки: подписчики (sub mus) получают играющие треки.
 # Пусто — музыкальный бот не подключён (sub mus отвечает, что не настроен).
-TG_MUSIC_TOKEN = str(_cfg("telegram_relay.music_token", "TG_MUSIC_TOKEN", "")).strip()
+TG_MUSIC_TOKEN = str(_cfg("telegram.music_token", "TG_MUSIC_TOKEN", "")).strip()
 
 # Регистратор учётных записей TeamTalk (модуль tt_register.py): отдельный
 # Telegram-бот принимает заявки (логин + пароль), админ принимает/отклоняет,
 # при принятии бот создаёт учётку и шлёт сетевое сообщение. Пустой токен —
 # модуль не запускается.
-REG_ENABLED = bool(_cfg("telegram_registration.enabled", None, False))
-REG_TOKEN = str(_cfg("telegram_registration.token", "TG_REG_TOKEN", "")).strip()
-REG_ADMIN_USER_IDS = [int(x) for x in (_cfg("telegram_registration.admin_user_ids", None, []) or []) if x]
-REG_BROADCAST_TEXT = str(_cfg("telegram_registration.broadcast_text", None, "")).strip()
-REG_ADMIN_TT_USER = str(_cfg("telegram_registration.admin_username", "TEAMTALK_ADMIN_USER", "bot_admin")).strip()
-REG_ADMIN_TT_PASS = str(_cfg("telegram_registration.admin_password", "TEAMTALK_ADMIN_PASSWORD", "")).strip()
-REG_ADMIN_TT_NICK = str(_cfg("telegram_registration.admin_nickname", None, "регистратор")).strip()
+REG_ENABLED = bool(_cfg("registration.enabled", None, False))
+REG_TOKEN = str(_cfg("registration.token", "TG_REG_TOKEN", "")).strip()
+REG_ADMIN_USER_IDS = [int(x) for x in (_cfg("registration.notify_user_ids", None, []) or []) if x]
+REG_BROADCAST_TEXT = str(_cfg("registration.broadcast_text", None, "")).strip()
+REG_ADMIN_TT_USER = str(_cfg("registration.admin_username", "TEAMTALK_ADMIN_USER", "bot_admin")).strip()
+REG_ADMIN_TT_PASS = str(_cfg("registration.admin_password", "TEAMTALK_ADMIN_PASSWORD", "")).strip()
+REG_ADMIN_TT_NICK = str(_cfg("registration.admin_nickname", None, "регистратор")).strip()
 
 # Optional YouTube cookies to bypass bot-check on restricted videos.
 COOKIES = _cfg("services.yt.cookiefile_path", "TEAMTALK_COOKIES", None) or os.path.join(
@@ -278,20 +280,20 @@ YTDLP = sys.executable and [sys.executable, "-m", "yt_dlp"]
 # JS runtime for yt-dlp challenge solving (deno binary; override via config/env).
 YT_JS_RUNTIME = os.environ.get("YT_JS_RUNTIME")
 if YT_JS_RUNTIME is None:
-    YT_JS_RUNTIME = _cfg("general.yt_js_runtime", None, None)
+    YT_JS_RUNTIME = _cfg("runtime.yt_js_runtime", None, None)
 if not YT_JS_RUNTIME:
     YT_JS_RUNTIME = "/home/superlisa/.local/bin/deno"
 
 # YouTube po_token provider extractor-arg; empty disables it (e.g. no bgutil server).
 YT_PO_TOKEN = os.environ.get("YT_PO_TOKEN_EXTRACTOR")
 if YT_PO_TOKEN is None:
-    YT_PO_TOKEN = _cfg("general.yt_po_token_extractor", None, None)
+    YT_PO_TOKEN = _cfg("runtime.yt_po_token_extractor", None, None)
     if YT_PO_TOKEN is None:
         YT_PO_TOKEN = "youtube:po_token_provider=bgutil:http"
 
 # Max tracks loaded from a playlist (YouTube / Yandex Music). High default so big
 # playlists («Мне нравится» ≈ тысячи треков) load fully; override via config.
-PLAYLIST_LIMIT = int(_cfg("general.playlist_limit", None, 5000))
+PLAYLIST_LIMIT = int(_cfg("runtime.playlist_limit", None, 5000))
 
 # Voice transmission: raw PCM fed to TT_InsertAudioBlock as STREAMTYPE_VOICE.
 VOICE_RATE = 48000  # Hz
@@ -301,7 +303,7 @@ VOICE_CHUNK_BYTES = VOICE_CHUNK * 2  # s16 mono
 # Playback through PulseAudio: when set, the track is played by ffmpeg into
 # this sink and captured back from its monitor, so anything audible on the
 # machine can be routed into the channel. Empty = decode straight to PCM.
-PULSE_SINK = _cfg("general.pulse_sink", None, "") or ""
+PULSE_SINK = _cfg("playback.pulse_sink", None, "") or ""
 
 
 def log(msg):
@@ -2369,9 +2371,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             svc = {"yt": "YouTube", "ym": "Яндекс.Музыка"}.get(self.service, self.service)
             try:
                 _save_config({
-                    "teamtalk": {"nickname": self.nickname},
-                    "general": {"default_service": self.service},
-                    "player": {"default_volume": int(self.volume)},
+                    "server": {"nickname": self.nickname},
+                    "runtime": {"main_service": self.service},
+                    "playback": {"default_volume": int(self.volume)},
                 })
                 self._send("💾 Сохранено в config.json: ник «%s», сервис %s, громкость %d."
                            % (self.nickname, svc, self.volume))
@@ -3158,7 +3160,7 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     # ======================= авто-защита от ботнетов =======================
     # Проверяются ТОЛЬКО гостевые/публичные входы (имя задаётся в конфиге
-    # protection.guest_usernames — у владельца это «1», у других может быть
+    # guard.guest_logins — у владельца это «1», у других может быть
     # «guest», «public» или пустая анонимная). Всем остальным учёткам бот
     # доверяет: владельца с VPN и друзей не блокируем. Для гостя срабатывают:
     # гео страны IP (по умолчанию только РФ), ботнет-ник, слишком длинный ник,
@@ -3175,24 +3177,24 @@ class MusicBot(TeamTalk5.TeamTalk):
                     return default
             return node if node not in (None, "", [], {}) else default
 
-        p = _g(CFG, "protection", {}) or {}
+        p = _g(CFG, "guard", {}) or {}
         geo = _g(p, "geo", {}) or {}
         burst = _g(p, "burst", {}) or {}
-        wl = _g(p, "whitelist", {}) or {}
+        wl = _g(p, "trusted", {}) or {}
         rf = _g(geo, "ranges_file", "geo/ru_ipv4.txt") or "geo/ru_ipv4.txt"
         if not os.path.isabs(rf):
             rf = os.path.join(BASE_DIR, rf)
         return {
             "enabled": bool(_g(p, "enabled", True)),
-            "guest_usernames": {str(u).strip().lower() for u in (_g(p, "guest_usernames", []) or [])},
+            "guest_usernames": {str(u).strip().lower() for u in (_g(p, "guest_logins", []) or [])},
             "notify": bool(_g(p, "notify", True)),
             "geo_enabled": bool(_g(geo, "enabled", True)),
             "allow_countries": [str(c).upper() for c in (_g(geo, "allow_countries", ["RU"]) or ["RU"])],
             "ranges_file": rf,
-            "nick_enabled": bool(_g(p, "nick_enabled", True)),
-            "empty_nick_enabled": bool(_g(p, "empty_nick_enabled", True)),
-            "nick_max_len": int(_g(p, "nick_max_len", _DEFAULT_NICK_MAX_LEN) or 0),
-            "mat_enabled": bool(_g(p, "mat_enabled", True)),
+            "nick_enabled": bool(_g(p, "botnet_nick_check", True)),
+            "empty_nick_enabled": bool(_g(p, "kick_empty_nick", True)),
+            "nick_max_len": int(_g(p, "max_nick_len", _DEFAULT_NICK_MAX_LEN) or 0),
+            "mat_enabled": bool(_g(p, "mat_check", True)),
             "mat_re": _compile_mat_re(_g(p, "mat_words", _DEFAULT_MAT_ROOTS) or _DEFAULT_MAT_ROOTS),
             "burst_enabled": bool(_g(p, "burst_enabled", True)),
             "burst_window": float(_g(burst, "window_sec", 30) or 30),
@@ -3283,7 +3285,7 @@ class MusicBot(TeamTalk5.TeamTalk):
     def _prot_is_guest_login(self, username):
         """Гостевая/публичная учётка — ЕДИНСТВЕННЫЕ, кого проверяем.
         Пустое имя пользователя (анонимный гость) и учётки из
-        protection.guest_usernames (у владельца это «1», у других серверов
+        guard.guest_logins (у владельца это «1», у других серверов
         может быть «guest», «public» или пустая). Все прочие учётные записи
         бот доверяет без проверок — флуд ходит именно через гостевую."""
         u = (username or "").strip()
