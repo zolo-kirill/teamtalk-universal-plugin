@@ -12,7 +12,7 @@ set -euo pipefail
 
 CREATOR_LINE="Автор: Kirill (@zolo-kirill)"
 REPO_URL_DEFAULT="https://github.com/zolo-kirill/teamtalk-universal-plugin.git"
-UNIT_NAME="teamtalk-universal-plugin.service"
+UNIT_NAME="tt-plugin.service"
 UNIT_DIR="$HOME/.config/systemd/user"
 DRY_RUN="${SETUP_DRY_RUN:-0}"
 
@@ -262,12 +262,12 @@ do_install() {
     fi
 
     # systemd-сервис (если есть) или запуск в фоне
-    if [ -d "/run/systemd/system" ] && [ -f "$REPO_DIR/teamtalk-universal-plugin.service" ]; then
+    if [ -d "/run/systemd/system" ] && [ -f "$REPO_DIR/tt-plugin.service" ]; then
         mkdir -p "$UNIT_DIR"
         if [ "$DRY_RUN" = "1" ]; then
             say "    [проверка] sed __DIR__ -> $UNIT_DIR/$UNIT_NAME"
         else
-            sed -e "s|__DIR__|$REPO_DIR|g" "$REPO_DIR/teamtalk-universal-plugin.service" > "$UNIT_DIR/$UNIT_NAME"
+            sed -e "s|__DIR__|$REPO_DIR|g" "$REPO_DIR/tt-plugin.service" > "$UNIT_DIR/$UNIT_NAME"
         fi
         run systemctl --user daemon-reload
         run systemctl --user enable "$UNIT_NAME"

@@ -77,7 +77,7 @@
         "guest_usernames": ["1"],
         "notify": true,
         "geo": {
-            "enabled": true,
+            "enabled": false,
             "allow_countries": ["RU"],
             "ranges_file": "geo/ru_ipv4.txt"
         },

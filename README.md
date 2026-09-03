@@ -67,7 +67,7 @@
 - `enabled` — вкл/выкл всю защиту (по умолчанию вкл)
 - `guest_usernames` — список логинов гостевых/публичных учёток, которые бот проверяет. **Впиши сюда свою гостевую учётку** («1», «guest», …). Пустой логин (анонимный гость) проверяется всегда. Все остальные учётки бот доверяет без проверок — владельца, админов и обычных пользователей защита не касается
 - `notify` — слать ли агрегированный отчёт о срабатываниях в Telegram (`telegram_relay.notify_chat_id`)
-- `geo.enabled` — гео-фильтр: гость допускается только из стран `geo.allow_countries` (по умолчанию `["RU"]`). Список IP-диапазонов — офлайн-файл `geo/ru_ipv4.txt` (обновляется с ipdeny.com), внешние API не используются
+- `geo.enabled` — гео-фильтр: гость допускается только из стран `geo.allow_countries` (по умолчанию `["RU"]`). **По умолчанию выключен**, чтобы под гостевую не попадали легальные пользователи и свой бот статистики на зарубежном VPS. Если включишь — любой гость не из разрешённых стран будет баниться, поэтому таких гостей и своих ботов впиши в `whitelist`. Список IP-диапазонов — офлайн-файл `geo/ru_ipv4.txt` (обновляется с ipdeny.com), внешние API не используются
 - `nick_enabled` — ловить ботнет-ники вида «🤖 Shadow_Pilot_46» (эмодзи + латиница слово\_слово\_число)
 - `empty_nick_enabled` — кикать входы с пустым ником
 - `burst_enabled` — защита от всплеска: если за `burst.window_sec` секунд с гостевой учётки приходит `burst.threshold` разных IP, включается режим отражения атаки на `burst.cooldown_sec` секунд
@@ -119,7 +119,7 @@ sudo apt-get install -y ffmpeg python3 python3-pip python3-venv
 bash install.sh
 ```
 
-Установщик создаёт `.venv` с yt-dlp и yandex-music, проверяет SDK, создаёт шаблон `.secrets/.env`, ставит пользовательский systemd-сервис `teamtalk-universal-plugin` с автозапуском. Бот работает под твоим пользователем (не root), sudo нужен только для установки системных пакетов.
+Установщик создаёт `.venv` с yt-dlp и yandex-music, проверяет SDK, создаёт шаблон `.secrets/.env`, ставит пользовательский systemd-сервис `tt-plugin` с автозапуском. Бот работает под твоим пользователем (не root), sudo нужен только для установки системных пакетов.
 
 Полная ручная установка без скрипта — в разделе «Ручная установка (без скрипта)» ниже.
 
@@ -136,8 +136,8 @@ bash run.sh
 Или, если ставил через `install.sh`, — сервис уже работает и поднимется сам после перезагрузки:
 
 ```bash
-systemctl --user status teamtalk-universal-plugin    # статус
-journalctl --user -u teamtalk-universal-plugin -f    # логи
+systemctl --user status tt-plugin    # статус
+journalctl --user -u tt-plugin -f    # логи
 ```
 
 ## Ручная установка (без скрипта)
@@ -235,7 +235,7 @@ nohup bash run.sh > bot.log 2>&1 &
 mkdir -p ~/.config/systemd/user
 ```
 
-Файл `~/.config/systemd/user/teamtalk-universal-plugin.service`:
+Файл `~/.config/systemd/user/tt-plugin.service`:
 
 ```ini
 [Unit]
@@ -257,11 +257,11 @@ WantedBy=default.target
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now teamtalk-universal-plugin
+systemctl --user enable --now tt-plugin
 loginctl enable-linger $(id -un)   # сервис переживёт перезагрузку
 ```
 
-Логи: `journalctl --user -u teamtalk-universal-plugin -f`.
+Логи: `journalctl --user -u tt-plugin -f`.
 
 **Как переживается рестарт TeamTalk-сервера.** Внутренний reconnect бота
 не надёжен (connect иногда молча зависает), поэтому при потере или сбое
@@ -281,4 +281,4 @@ loginctl enable-linger $(id -un)   # сервис переживёт перез�
 - `geo/ru_ipv4.txt` — офлайн-список IPv4-диапазонов РФ для гео-фильтра защиты (обновляется с ipdeny.com)
 - `run.sh` — обёртка запуска (SDK env, секреты, venv)
 - `install.sh` — автоустановщик
-- `teamtalk-universal-plugin.service` — systemd-юнит
+- `tt-plugin.service` — шаблон systemd-юнита (имя службы `tt-plugin`, команды — `systemctl --user status/restart tt-plugin`)
