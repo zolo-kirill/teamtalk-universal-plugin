@@ -1378,7 +1378,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "pause / resume — пауза и продолжить\n"
             "stop — стоп, skip — пропустить трек\n"
             "u <ссылка> — играть по ссылке напрямую\n"
-            "v <1-100> — громкость, sf <сек> — перемотка (sf -5 — назад)\n"
+            "v <1-100> — громкость, sf <сек> — перемотка (sf -5 — назад, sb <сек> — назад)\n"
             "playlist — список плейлиста постранично\n"
             "radio — радиостанции (radio <номер> — запуск)\n"
             "fav — избранное (f +, f + <ссылка>, f <номер>, f - <номер>)\n"
@@ -2432,7 +2432,7 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     # Команды-«запросы», которые при приходе из Telegram объявляются в канале TeamTalk.
     _TG_KNOWN_CMDS = frozenset([
-        "v", "volume", "sf", "sub", "cm", "vo", "rs", "restart", "sv", "svc",
+        "v", "volume", "sf", "sb", "sub", "cm", "vo", "rs", "restart", "sv", "svc",
         "cn", "cs", "s", "stop", "skip", "queue", "q", "status", "now",
         "dl", "download", "lf", "n", "next", "b", "back", "prev", "playlist",
         "radio", "r", "f", "fav", "favorites", "play", "p", "pause", "resume",
@@ -2521,6 +2521,11 @@ class MusicBot(TeamTalk5.TeamTalk):
         m = re.match(r"^sf\s+(-?\d{1,6})$", cmd)
         if m:
             self._seek(int(m.group(1)))
+            return
+        # --- перемотка назад: sb 66 (на 66с назад) ---
+        m = re.match(r"^sb\s+(\d{1,6})$", cmd)
+        if m:
+            self._seek(-int(m.group(1)))
             return
 
         # --- подписка на уведомления: sub / /sub; подписка на музыку: sub mus ---
@@ -2856,7 +2861,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "/u <url> — сыграть ссылку напрямую\n"
             "/radio — станции (/radio <номер> — запуск)\n"
             "/fav — избранное (f + — добавить текущий, f + <ссылка>, f <номер>, f - <номер>)\n"
-            "/v <1-100> — громкость, /sf <сек> — перемотка (/sf -5 — назад)\n"
+            "/v <1-100> — громкость, /sf <сек> — перемотка (/sf -5 или /sb <сек> — назад)\n"
             "/cm — ответы в канал вкл/выкл, /vo — озвучка названий треков\n"
             "/sv yt / sv ym — сервис (YouTube / Яндекс.Музыка)\n"
             "/cn <ник> — ник, /cs <текст> — статус, /sc — сохранить настройки\n"
