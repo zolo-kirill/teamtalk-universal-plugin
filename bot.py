@@ -2574,13 +2574,17 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._send("Перехожу в канал: %s" % path)
             return
 
-        # --- играть по прямой ссылке независимо от сервиса: u <url> / ссылка <url> / link <url> ---
-        m = re.match(r"^(?:u|link|url)\s+(\S.*)$", low)
-        if m:
+        # --- прямая ссылка: u <url> / link <url> / url <url> ---
+        # (cmd уже без слэша: "/u https://…" → cmd = "u https://…")
+        first = cmd.split(None, 1)[0]
+        if first in ("u", "link", "url"):
             parts = text.split(None, 1)
-            u = URL_RE.search(parts[1]) if len(parts) > 1 else None
+            if len(parts) < 2:
+                self._send("Использование: /u <ссылка>. Или просто вставь ссылку — сыграю сам.")
+                return
+            u = URL_RE.search(parts[1])
             if not u:
-                self._send("Дай ссылку: u https://…")
+                self._send("Это не ссылка: «%s». Дай ссылку: /u https://…" % parts[1][:80])
                 return
             self._handle_url(u.group(0), u.group(0))
             return
