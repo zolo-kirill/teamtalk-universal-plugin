@@ -343,6 +343,38 @@ def _start_nightly_restart():
     threading.Thread(target=loop, daemon=True).start()
 
 
+_YTDLP_UPDATE_STAMP = os.path.join(BASE_DIR, ".ytdlp_update")
+
+
+def _ydlp_try_upgrade_daily():
+    """Раз в сутки проверяем свежую версию yt-dlp и ставим её в venv.
+
+    Каждое скачивание бот делает свежим subprocess'ом (`.venv/bin/python
+    -m yt_dlp`), поэтому обновление пакета действует на следующую попытку
+    сразу, без перезапуска. Штамп — чтобы не дёргать pip чаще раза в сутки.
+    """
+    try:
+        if os.path.isfile(_YTDLP_UPDATE_STAMP) and time.time() - os.path.getmtime(_YTDLP_UPDATE_STAMP) < 86400:
+            return False
+        open(_YTDLP_UPDATE_STAMP, "w").close()
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "--quiet", "yt-dlp"],
+            capture_output=True, text=True, timeout=240,
+        )
+        log("yt-dlp daily upgrade: rc=%d %s" % (r.returncode, (r.stderr or "").strip()[-160:]))
+        return r.returncode == 0
+    except Exception as e:
+        log("yt-dlp daily upgrade err: %s" % str(e)[:120])
+        return False
+
+
+def _start_ydlp_updater():
+    threading.Thread(target=_ydlp_try_upgrade_daily, daemon=True).start()
+
+
 class MusicBot(TeamTalk5.TeamTalk):
     def __init__(self):
         super().__init__()
@@ -1363,6 +1395,50 @@ class MusicBot(TeamTalk5.TeamTalk):
             proc.wait()
             raise
 
+    _YT_ALT_CLIENTS = ("android", "ios", "tv_embedded", "web_embedded", "mweb", "web_safari")
+
+    def _yt_alt_download(self, out, real_url):
+        """yt-dlp не взял видео основным клиентом — перебираем запасные клиенты
+        YouTube (player_client), с куками и анонимно. Возвращает (rc, stdout,
+        stderr) первого успеха либо (None, "", последняя ошибка)."""
+        last_err = ""
+        for client in self._YT_ALT_CLIENTS:
+            for use_ck in (True, False):
+                cmd = list(YTDLP) + [
+                    "--no-playlist", "--no-simulate", "-x",
+                    "--audio-format", "mp3", "--audio-quality", "5",
+                    "--remote-components", "ejs:github",
+                    "--extractor-args", "youtube:player_client=%s" % client,
+                    "-o", out + ".%(ext)s",
+                    "--print", "%(title)s",
+                ]
+                if YT_JS_RUNTIME:
+                    cmd += ["--js-runtimes", "deno:%s" % YT_JS_RUNTIME]
+                ck = None
+                if use_ck:
+                    ck = _fresh_cookies(COOKIES)
+                    if ck:
+                        cmd += ["--cookies", ck]
+                cmd += ["--", real_url]
+                try:
+                    rc, stdout, stderr = self._run_ydl(cmd, timeout=300)
+                except subprocess.TimeoutExpired:
+                    rc, stdout, stderr = 1, "", "timeout"
+                finally:
+                    if ck:
+                        _drop_cookies(ck)
+                if rc == 0 and os.path.exists(out + ".mp3"):
+                    log("yt alt client %s ck=%d ok" % (client, use_ck))
+                    return rc, stdout, stderr
+                tail = ""
+                blob = (stderr or stdout or "").strip()
+                if blob:
+                    tail = blob.splitlines()[-1][:200]
+                log("yt alt client %s ck=%d fail: %s" % (client, use_ck, tail))
+                if tail:
+                    last_err = tail
+        return None, "", last_err
+
     def _ym_search_list(self, query):
         """Search Yandex Music; return list of {"key","title"} (up to 10)."""
         if not YM_TOKEN:
@@ -1611,6 +1687,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return
             title = ym_title or title
         canon_done = False
+        alt_tried = False  # запасные клиенты YouTube пробуем один раз на цикл
         for attempt in range(1, 4):
             try:
                 out = os.path.join(CACHE_DIR, uuid.uuid4().hex)
@@ -1652,6 +1729,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 mp3 = out + ".mp3"
                 if rc != 0 or not os.path.exists(mp3):
                     err_text = (stderr or stdout or "yt-dlp failed").strip()
+                    is_yt = "youtube.com" in real_url or "youtu.be" in real_url
                     if ("Video unavailable" in err_text and not canon_done
                             and ("youtube.com/watch?v=" in real_url or "youtu.be/" in real_url)):
                         new_url = self._canonical_yt_url(real_url)
@@ -1660,16 +1738,25 @@ class MusicBot(TeamTalk5.TeamTalk):
                             real_url = new_url
                             canon_done = True
                             continue
-                    if "Sign in to confirm" in err_text or "LOGIN_REQUIRED" in err_text:
-                        self.api_q.put(("download_fail", url, title, "YouTube заблокировал это видео на нашем сервере (Sign in to confirm you're not a bot). Попробуй другой запрос или прямую ссылку — популярные видео обычно играют."))
+                    # основной клиент не взял — пробуем запасные клиенты YouTube
+                    if is_yt and not alt_tried:
+                        alt_tried = True
+                        arc, aout, aerr = self._yt_alt_download(out, real_url)
+                        if arc == 0:
+                            rc, stdout, stderr = 0, aout, aerr
+                        elif aerr:
+                            err_text = aerr
+                    if rc != 0:
+                        if "Sign in to confirm" in err_text or "LOGIN_REQUIRED" in err_text:
+                            self.api_q.put(("download_fail", url, title, "YouTube не даёт это видео с нашего сервера (требует вход в аккаунт — обычно возрастное ограничение). Попробуй другой ролик — обычные видео играют."))
+                            return
+                        err_msg = (err_text.splitlines()[-1] if err_text else "yt-dlp failed")[:300]
+                        if attempt < 3:
+                            self.api_q.put(("status", "⚠ %s. Повтор %d/3 через 15с…" % (err_msg, attempt)))
+                            time.sleep(15)
+                            continue
+                        self.api_q.put(("download_fail", url, title, err_msg))
                         return
-                    err_msg = (err_text.splitlines()[-1] if err_text else "yt-dlp failed")[:300]
-                    if attempt < 3:
-                        self.api_q.put(("status", "⚠ %s. Повтор %d/3 через 15с…" % (err_msg, attempt)))
-                        time.sleep(15)
-                        continue
-                    self.api_q.put(("download_fail", url, title, err_msg))
-                    return
                 got_title = (stdout or "").strip().splitlines()
                 real_title = got_title[0] if got_title else title
                 self.api_q.put(("download_ok", url, real_title, mp3))
@@ -3724,6 +3811,7 @@ def main():
     bot = MusicBot()
     log("starting music bot for %s:%d (user %s)" % (HOST, TCP_PORT, USERNAME))
     _start_nightly_restart()
+    _start_ydlp_updater()
     if REG_ENABLED and REG_TOKEN and REG_ADMIN_USER_IDS:
         try:
             import tt_register
