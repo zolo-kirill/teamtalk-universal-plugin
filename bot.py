@@ -325,9 +325,11 @@ if YT_PO_TOKEN is None:
 PLAYLIST_LIMIT = int(_cfg("runtime.playlist_limit", None, 5000))
 
 # Voice transmission: raw PCM fed to TT_InsertAudioBlock as STREAMTYPE_VOICE.
+# Стерео: серверные каналы стоят на Opus 48000/2ch, так что шлём 2 канала.
 VOICE_RATE = 48000  # Hz
-VOICE_CHUNK = 960   # samples per block (20 ms at 48 kHz)
-VOICE_CHUNK_BYTES = VOICE_CHUNK * 2  # s16 mono
+VOICE_CHANNELS = 2
+VOICE_CHUNK = 960   # samples per channel per block (20 ms at 48 kHz)
+VOICE_CHUNK_BYTES = VOICE_CHUNK * 2 * VOICE_CHANNELS  # s16 interleaved
 
 # Playback through PulseAudio: when set, the track is played by ffmpeg into
 # this sink and captured back from its monitor, so anything audible on the
@@ -1939,7 +1941,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 )
                 cap = subprocess.Popen(
                     ["parec", "--device=%s.monitor" % pulse, "--format=s16le",
-                     "--rate", str(VOICE_RATE), "--channels=1"],
+                     "--rate", str(VOICE_RATE), "--channels=%d" % VOICE_CHANNELS],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                     start_new_session=True,
                 )
@@ -1948,7 +1950,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 cmd = ["ffmpeg", "-y"]
                 if offset_ms > 0:
                     cmd += ["-ss", "%.3f" % (offset_ms / 1000.0)]
-                cmd += ["-i", path, "-vn", "-f", "s16le", "-ac", "1",
+                cmd += ["-i", path, "-vn", "-f", "s16le", "-ac", str(VOICE_CHANNELS),
                         "-ar", str(VOICE_RATE), "-"]
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
@@ -1998,7 +2000,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 ab = TeamTalk5.AudioBlock()
                 ab.nStreamID = stream_id
                 ab.nSampleRate = VOICE_RATE
-                ab.nChannels = 1
+                ab.nChannels = VOICE_CHANNELS
                 ab.lpRawAudio = ctypes.cast(raw, ctypes.c_void_p)
                 ab.nSamples = VOICE_CHUNK
                 ab.uStreamTypes = StreamType.STREAMTYPE_VOICE
@@ -2022,7 +2024,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                     ab = TeamTalk5.AudioBlock()
                     ab.nStreamID = stream_id
                     ab.nSampleRate = VOICE_RATE
-                    ab.nChannels = 1
+                    ab.nChannels = VOICE_CHANNELS
                     ab.lpRawAudio = ctypes.cast(raw, ctypes.c_void_p)
                     ab.nSamples = VOICE_CHUNK
                     ab.uStreamTypes = StreamType.STREAMTYPE_VOICE
