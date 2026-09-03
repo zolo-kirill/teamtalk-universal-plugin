@@ -68,6 +68,37 @@ def _is_botnet_nick(nick):
     return n.count("_") >= 3
 
 
+# ---- признаки не-дружелюбного ника (масса текста или мат) ----
+# Гости могут вписать в «ник» целую простыню/оскорбление и светить её в списке
+# пользователей. Слишком длинный или нецензурный ник режем киком + баном IP,
+# не дожидаясь гео (российский IP фильтр стран не ловит). Нормальный ник всегда
+# короче 40 символов — порог настраивается в protection.nick_max_len (0 = выкл).
+_DEFAULT_NICK_MAX_LEN = 40
+
+# Корни мата (после нормализации ё->е и lower). Подбор консервативный: только
+# однозначные обсценные корни, чтобы «хулиган», «лебедь», «мудрый», «херсон»
+# (слова с похожими подстроками) НЕ ловились. Настраивается в
+# protection.mat_words (свой список вместо встроенного).
+_DEFAULT_MAT_ROOTS = (
+    "пизд", "хуй", "хуе", "хуя", "бля", "еба", "ебл", "ебн", "ебок",
+    "заеб", "наеб", "поеб", "говн", "гандон", "залуп", "шлюх", "дроч",
+    "манд", "мудак", "мудач", "пидор", "пидр", "сука", "суки", "суку",
+    "херн", "херо",
+)
+
+
+def _compile_mat_re(words):
+    """Регэксп по списку корней (ё->е, lower). Пусто/None при пустом списке."""
+    pats = []
+    for w in words or []:
+        w = str(w).strip().lower().replace("ё", "е")
+        if len(w) >= 2:
+            pats.append(re.escape(w))
+    if not pats:
+        return None
+    return re.compile("|".join(pats))
+
+
 # ---- config: JSON file in the TtMediaBot style ----
 # config.json (gitignored) overrides config_default.json; env vars are a fallback.
 def _deep_merge(base, over):
@@ -3130,9 +3161,10 @@ class MusicBot(TeamTalk5.TeamTalk):
     # protection.guest_usernames — у владельца это «1», у других может быть
     # «guest», «public» или пустая анонимная). Всем остальным учёткам бот
     # доверяет: владельца с VPN и друзей не блокируем. Для гостя срабатывают:
-    # гео страны IP (по умолчанию только РФ), ботнет-ник, пустой ник, всплеск
-    # массовых входов. Сработавших кикаем и, если можно, баним IP, плюс шлём
-    # агрегированный алерт в Telegram.
+    # гео страны IP (по умолчанию только РФ), ботнет-ник, слишком длинный ник,
+    # нецензурный ник, пустой ник, всплеск массовых входов. Длина/мат считаются
+    # ДО гео — ловят простыни в нике даже с российских адресов. Сработавших
+    # кикаем и, если можно, баним IP, плюс шлём агрегированный алерт в Telegram.
 
     def _prot_read_cfg(self):
         def _g(node, path, default):
@@ -3159,6 +3191,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             "ranges_file": rf,
             "nick_enabled": bool(_g(p, "nick_enabled", True)),
             "empty_nick_enabled": bool(_g(p, "empty_nick_enabled", True)),
+            "nick_max_len": int(_g(p, "nick_max_len", _DEFAULT_NICK_MAX_LEN) or 0),
+            "mat_enabled": bool(_g(p, "mat_enabled", True)),
+            "mat_re": _compile_mat_re(_g(p, "mat_words", _DEFAULT_MAT_ROOTS) or _DEFAULT_MAT_ROOTS),
             "burst_enabled": bool(_g(p, "burst_enabled", True)),
             "burst_window": float(_g(burst, "window_sec", 30) or 30),
             "burst_threshold": int(_g(burst, "threshold", 20) or 20),
@@ -3277,6 +3312,13 @@ class MusicBot(TeamTalk5.TeamTalk):
             return ("пустой ник (учётка «%s»)" % (username or "?"), True)
         if self._prot_cfg["nick_enabled"] and nick and _is_botnet_nick(nick):
             return ("ботнет-ник «%s»" % nick[:28], False)
+        mlen = self._prot_cfg["nick_max_len"]
+        if nick and mlen and len(nick) > mlen:
+            return ("слишком длинный ник «%s» (%d симв.)" % (nick[:24], len(nick)), False)
+        mre = self._prot_cfg["mat_re"]
+        if nick and self._prot_cfg["mat_enabled"] and mre and \
+                mre.search(nick.lower().replace("ё", "е")):
+            return ("нецензурный ник «%s»" % nick[:24], False)
         if self._prot_burst_until > time.time():
             return ("всплеск входов (режим защиты)", False)
         if self._prot_cfg["geo_enabled"] and ip:
