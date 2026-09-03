@@ -17,6 +17,9 @@ import traceback
 import urllib.parse
 import urllib.request
 import uuid
+import bisect
+import ipaddress
+from collections import deque
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -38,6 +41,32 @@ def _b(s):
     return s.encode("utf-8") if isinstance(s, str) else s
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+# ---- признаки ботнет-клиентов (массовые входы «мёртвых» ботов) ----
+# Флуд-ники вида «🤖 Shadow_Pilot_46»: эмодзи + латинское слово_слово_число.
+# Кириллические ники и одиночные подчёркивания («kirill_mobile») не трогаем.
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF\U00002190-\U000021FF\U0000FE0F\U00002300-\U000023FF]"
+)
+_BOTNET_WORD_RE = re.compile(r"[A-Za-z]{2,}_[A-Za-z0-9]{1,}(?:_[0-9]{1,})?")
+
+
+def _is_botnet_nick(nick):
+    """Эвристика ботнет-ника: не пустой, >=2 подчёркиваний и латинское
+    слово_слово. Без эмодзи требуем >=3 подчёркиваний, чтобы не ловить
+    обычные ники вида «my_nick»."""
+    n = (nick or "").strip()
+    if not n or n.count("_") < 2:
+        return False
+    has_emoji = bool(_EMOJI_RE.search(n))
+    has_word = bool(_BOTNET_WORD_RE.search(n))
+    if not has_word:
+        return False
+    if has_emoji:
+        return True
+    return n.count("_") >= 3
+
 
 # ---- config: JSON file in the TtMediaBot style ----
 # config.json (gitignored) overrides config_default.json; env vars are a fallback.
@@ -351,6 +380,27 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._music_offset = 0
         self.admins = self._load_admins()  # user id администраторов Telegram (users.db); владелец — всегда
         self.bans = self._load_bans()  # баны, выданные через Telegram (для /unban)
+        # ---- авто-защита от ботнетов (гео-РФ для не-админ входов + ботнет-ники) ----
+        self._prot_cfg = self._prot_read_cfg()
+        self._ru_starts = []  # отсортированные начала RU-подсетей (bisect)
+        self._ru_ends = []
+        self._banned_ips = set()
+        for _rec in (self.bans or {}).values():
+            _bip = (_rec or {}).get("ip") or ""
+            if _bip:
+                self._banned_ips.add(_bip)
+        self._prot_recent = deque()  # недавние входы (time, ip) — детект всплеска
+        self._prot_burst_until = 0.0
+        self._prot_counts = {}  # текст причины -> сколько раз (агрегированный репорт)
+        self._prot_last_report = 0.0
+        self._prot_lock = threading.Lock()
+        self._prot_flush = None  # поток-флушер репортов
+        self._prot_worker = None  # поток-банильщик (серийная очередь)
+        self._prot_q = queue.Queue()
+        self._prot_bad = {}  # uid -> причина: этих не анонсируем (вход/приветствие)
+        self._prot_geo_off_warned = False
+        if self._prot_cfg.get("enabled") and self._prot_cfg.get("geo_enabled"):
+            self._prot_load_ranges()
         self.pending_replies = self._load_replies()  # двухсторонние реплики: tg message_id → данные пользователя
         self._prune_replies()
         if TG_TOKEN:
@@ -1028,6 +1078,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self.doKickUser(target, 0)
                 if ip:
                     self.doBanIPAddress(_b(ip), 0)
+                    self._banned_ips.add(ip)
                     self.bans[str(target)] = {
                         "nick": nick,
                         "username": self._tt_field(u, "szUsername") if u else "",
@@ -1053,6 +1104,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             try:
                 if ip:
                     self.doUnBanUser(_b(ip), 0)
+                    self._banned_ips.discard(ip)
                     ok = True
             except Exception as e:
                 log("unban err: %s" % e)
@@ -3048,17 +3100,353 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception as e:
             log("welcome do err: %s" % str(e)[:150])
 
+    # ======================= авто-защита от ботнетов =======================
+    # Проверяются ТОЛЬКО гостевые/публичные входы (имя задаётся в конфиге
+    # protection.guest_usernames — у владельца это «1», у других может быть
+    # «guest», «public» или пустая анонимная). Всем остальным учёткам бот
+    # доверяет: владельца с VPN и друзей не блокируем. Для гостя срабатывают:
+    # гео страны IP (по умолчанию только РФ), ботнет-ник, пустой ник, всплеск
+    # массовых входов. Сработавших кикаем и, если можно, баним IP, плюс шлём
+    # агрегированный алерт в Telegram.
+
+    def _prot_read_cfg(self):
+        def _g(node, path, default):
+            for p in path.split("."):
+                if isinstance(node, dict) and p in node:
+                    node = node[p]
+                else:
+                    return default
+            return node if node not in (None, "", [], {}) else default
+
+        p = _g(CFG, "protection", {}) or {}
+        geo = _g(p, "geo", {}) or {}
+        burst = _g(p, "burst", {}) or {}
+        wl = _g(p, "whitelist", {}) or {}
+        rf = _g(geo, "ranges_file", "geo/ru_ipv4.txt") or "geo/ru_ipv4.txt"
+        if not os.path.isabs(rf):
+            rf = os.path.join(BASE_DIR, rf)
+        return {
+            "enabled": bool(_g(p, "enabled", True)),
+            "guest_usernames": {str(u).strip().lower() for u in (_g(p, "guest_usernames", []) or [])},
+            "notify": bool(_g(p, "notify", True)),
+            "geo_enabled": bool(_g(geo, "enabled", True)),
+            "allow_countries": [str(c).upper() for c in (_g(geo, "allow_countries", ["RU"]) or ["RU"])],
+            "ranges_file": rf,
+            "nick_enabled": bool(_g(p, "nick_enabled", True)),
+            "empty_nick_enabled": bool(_g(p, "empty_nick_enabled", True)),
+            "burst_enabled": bool(_g(p, "burst_enabled", True)),
+            "burst_window": float(_g(burst, "window_sec", 30) or 30),
+            "burst_threshold": int(_g(burst, "threshold", 20) or 20),
+            "burst_cooldown": float(_g(burst, "cooldown_sec", 300) or 300),
+            "wl_usernames": {str(u).strip().lower() for u in (_g(wl, "usernames", []) or []) if str(u).strip()},
+            "wl_nicknames": [str(n).strip().lower() for n in (_g(wl, "nicknames", []) or []) if str(n).strip()],
+            "wl_ips": [str(i).strip() for i in (_g(wl, "ip_prefixes", []) or []) if str(i).strip()],
+        }
+
+    def _prot_load_ranges(self):
+        """Загружает офлайн-CIDR список стран в отсортированные массивы int."""
+        try:
+            path = self._prot_cfg["ranges_file"]
+            starts, ends = [], []
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.split("#")[0].strip()
+                    if not line:
+                        continue
+                    if "/" not in line:
+                        line += "/32"
+                    try:
+                        net = ipaddress.ip_network(line, strict=False)
+                    except Exception:
+                        continue
+                    if net.version != 4:
+                        continue
+                    starts.append(int(net.network_address))
+                    ends.append(int(net.broadcast_address))
+            order = sorted(range(len(starts)), key=lambda i: starts[i])
+            self._ru_starts = [starts[j] for j in order]
+            self._ru_ends = [ends[j] for j in order]
+            log("protection: RU ranges loaded: %d" % len(self._ru_starts))
+        except Exception as e:
+            log("protection: geo load err: %s" % str(e)[:150])
+            self._ru_starts = []
+            self._ru_ends = []
+
+    @staticmethod
+    def _prot_v4int(ip):
+        """Возвращает int для IPv4 (в т.ч. IPv4-mapped «::ffff:a.b.c.d»), иначе None."""
+        s = ip.split("%")[0].strip()
+        if not s:
+            return None
+        try:
+            return int(ipaddress.IPv4Address(s))
+        except Exception:
+            pass
+        try:
+            a = ipaddress.ip_address(s)
+        except Exception:
+            return None
+        if isinstance(a, ipaddress.IPv4Address):
+            return int(a)
+        if isinstance(a, ipaddress.IPv6Address):
+            m = getattr(a, "ipv4_mapped", None)
+            if m is not None:
+                return int(m)
+        return None
+
+    def _ip_in_ru(self, ip):
+        """True, если ip входит в RU-подсети (двоичный поиск по сортировке)."""
+        if not ip or not self._ru_starts:
+            return False
+        num = self._prot_v4int(ip)
+        if num is None:
+            return False
+        i = bisect.bisect_right(self._ru_starts, num) - 1
+        return i >= 0 and num <= self._ru_ends[i]
+
+    @staticmethod
+    def _nick_wl(nl, pref):
+        """Ник в белом списке: точное совпадение или префикс до границы слова
+        (пробел/дефис/скобки), чтобы «kirill» не пускал «kirill_bot»."""
+        if nl == pref:
+            return True
+        if not nl.startswith(pref):
+            return False
+        return nl[len(pref):len(pref) + 1] in (" ", "-", "(", "[", "")
+
+    def _prot_is_admin(self, user, uid):
+        """Сам бот или серверный админ (uUserType 2) — всегда доверяем."""
+        if uid == self.my_user_id:
+            return True
+        return bool(int(getattr(user, "uUserType", 0) or 0) & 2)
+
+    def _prot_is_guest_login(self, username):
+        """Гостевая/публичная учётка — ЕДИНСТВЕННЫЕ, кого проверяем.
+        Пустое имя пользователя (анонимный гость) и учётки из
+        protection.guest_usernames (у владельца это «1», у других серверов
+        может быть «guest», «public» или пустая). Все прочие учётные записи
+        бот доверяет без проверок — флуд ходит именно через гостевую."""
+        u = (username or "").strip()
+        if not u:
+            return True
+        return u.lower() in self._prot_cfg["guest_usernames"]
+
+    def _prot_in_whitelist(self, username, nick, ip):
+        """Дополнительный пропуск даже на гостевой учётке (по имени/нику/IP)."""
+        if (username or "").lower() in self._prot_cfg["wl_usernames"]:
+            return True
+        nl = (nick or "").lower()
+        for pref in self._prot_cfg["wl_nicknames"]:
+            if self._nick_wl(nl, pref):
+                return True
+        if ip:
+            for p in self._prot_cfg["wl_ips"]:
+                if ip.startswith(p):
+                    return True
+        return False
+
+    def _prot_decide(self, nick, username, ip):
+        """Первая сработавшая проверка. Возвращает (reason, kick_only);
+        (None, False) — вход разрешён."""
+        if self._prot_cfg["empty_nick_enabled"] and not nick:
+            return ("пустой ник (учётка «%s»)" % (username or "?"), True)
+        if self._prot_cfg["nick_enabled"] and nick and _is_botnet_nick(nick):
+            return ("ботнет-ник «%s»" % nick[:28], False)
+        if self._prot_burst_until > time.time():
+            return ("всплеск входов (режим защиты)", False)
+        if self._prot_cfg["geo_enabled"] and ip:
+            if not self._ru_starts:
+                # RU-список не загрузился — не рубим всех подряд (fail-open),
+                # предупреждаем один раз; ник/всплеск продолжают работать
+                if not self._prot_geo_off_warned:
+                    self._prot_geo_off_warned = True
+                    self._prot_note("нет загруженного RU-списка — гео-проверка отключена")
+                return (None, False)
+            if not self._ip_in_ru(ip):
+                extras = [c for c in self._prot_cfg["allow_countries"] if c != "RU"]
+                if not extras:
+                    return ("IP %s не из РФ (ник «%s»)" % (ip, nick or username or "?"), False)
+        return (None, False)
+
+    def _prot_burst_track(self, ip):
+        """Скользящее окно недавних входов; при N разных IP за окно включает
+        режим всплеска на cooldown."""
+        if not self._prot_cfg["burst_enabled"] or not ip:
+            return
+        now = time.time()
+        win = self._prot_cfg["burst_window"]
+        self._prot_recent.append((now, ip))
+        while self._prot_recent and now - self._prot_recent[0][0] > win:
+            self._prot_recent.popleft()
+        if now < self._prot_burst_until:
+            return
+        ips = {p[1] for p in self._prot_recent if p[1]}
+        if len(ips) >= self._prot_cfg["burst_threshold"]:
+            self._prot_burst_until = now + self._prot_cfg["burst_cooldown"]
+            self._prot_note("всплеск входов: %d разных IP за %dс — режим защиты на %dс"
+                            % (len(ips), int(win), int(self._prot_cfg["burst_cooldown"])))
+            log("protection: burst tripped (%d IPs)" % len(ips))
+
+    def _prot_check_login(self, user):
+        """Хук из onCmdUserLoggedIn: на КАЖДЫЙ вход (в т.ч. реплей после
+        рестарта бота). Вердикт получает только гостевая/публичная учётка."""
+        try:
+            if not self._prot_cfg.get("enabled") or not user or not self.logged_in:
+                return
+            try:
+                uid = int(getattr(user, "nUserID", 0) or 0)
+            except Exception:
+                uid = 0
+            if uid <= 0:
+                return
+            ip = self._tt_field(user, "szIPAddress") or ""
+            nick = self._tt_field(user, "szNickname") or ""
+            username = self._tt_field(user, "szUsername") or ""
+            if self._prot_is_admin(user, uid):
+                return  # сам бот и админы — доверяем всегда (владелец под VPN)
+            if not self._prot_is_guest_login(username):
+                return  # не гостевая учётка — доверяем, не проверяем
+            if self._prot_in_whitelist(username, nick, ip):
+                return  # явный пропуск даже на гостевой
+            self._prot_burst_track(ip)
+            reason, kick_only = self._prot_decide(nick, username, ip)
+            if not reason:
+                return
+            self._prot_bad[uid] = reason
+            self._prot_q.put((uid, nick, username, ip, reason, kick_only))
+            if self._prot_worker is None or not self._prot_worker.is_alive():
+                self._prot_worker = threading.Thread(target=self._prot_ban_loop,
+                                                     daemon=True, name="prot-ban")
+                self._prot_worker.start()
+        except Exception as e:
+            log("protection check err: %s" % str(e)[:150])
+
+    def _prot_ban_loop(self):
+        """Серийный банильщик: один поток, очередь — чтобы флуд не плодил тысячи
+        потоков и не долбил диск одновременными save_bans."""
+        while True:
+            try:
+                uid, nick, username, ip, reason, kick_only = self._prot_q.get(timeout=4)
+            except queue.Empty:
+                self._prot_worker = None
+                return
+            try:
+                self._prot_ban_one(uid, nick, username, ip, reason, kick_only)
+            except Exception as e:
+                log("protection ban err: %s" % str(e)[:150])
+            finally:
+                self._prot_q.task_done()
+
+    def _prot_ban_one(self, uid, nick, username, ip, reason, kick_only):
+        try:
+            self.doKickUser(uid, 0)
+        except Exception as e:
+            log("protection kick err: %s" % str(e)[:120])
+        if kick_only or not ip:
+            self._prot_note(reason)
+            return
+        if ip in self._banned_ips:
+            self._prot_note(reason)  # IP уже в бане — считаем событие, банить нечего
+            return
+        try:
+            self.doBanIPAddress(_b(ip), 0)
+        except Exception as e:
+            log("protection ipban err: %s" % str(e)[:120])
+            self._prot_note("не забанить %s: %s" % (ip, str(e)[:90]))
+            return
+        self._banned_ips.add(ip)
+        self.bans[str(uid)] = {
+            "nick": nick,
+            "username": username,
+            "ip": ip,
+            "banned_at": time.time(),
+            "auto": reason,
+        }
+        self._trim_bans()
+        self._save_bans()
+        self._prot_note(reason)
+
+    def _trim_bans(self):
+        """Авто-баны не копим бесконечно: свыше 1200 записей режем старые авто до 800."""
+        try:
+            if len(self.bans) <= 1200:
+                return
+            auto = sorted(
+                ((v.get("banned_at") or 0, k) for k, v in self.bans.items()
+                 if isinstance(v, dict) and v.get("auto")),
+                key=lambda kv: kv[0],
+            )
+            for _, k in auto[:max(0, len(auto) - 800)]:
+                self.bans.pop(k, None)
+        except Exception:
+            pass
+
+    def _prot_note(self, key):
+        """Копит событие защиты в счётчик; флушер шлёт агрегированный репорт
+        в Telegram (не спамим на каждый кик)."""
+        try:
+            if not self._prot_cfg.get("notify"):
+                return
+            with self._prot_lock:
+                self._prot_counts[key] = self._prot_counts.get(key, 0) + 1
+                if self._prot_flush is None or not self._prot_flush.is_alive():
+                    self._prot_flush = threading.Thread(target=self._prot_flush_loop,
+                                                        daemon=True, name="prot-flush")
+                    self._prot_flush.start()
+        except Exception:
+            pass
+
+    def _prot_flush_loop(self):
+        while True:
+            time.sleep(10)
+            with self._prot_lock:
+                if not self._prot_counts:
+                    self._prot_flush = None
+                    return
+            if time.time() - self._prot_last_report < 30:
+                continue
+            with self._prot_lock:
+                counts = self._prot_counts
+                self._prot_counts = {}
+                self._prot_last_report = time.time()
+            self._prot_send_report(counts)
+
+    def _prot_send_report(self, counts):
+        try:
+            if not counts:
+                return
+            items = sorted(counts.items(), key=lambda kv: -kv[1])
+            lines = ["- %s: %d" % (k, v) for k, v in items[:8]]
+            rest = sum(v for _, v in items[8:])
+            if rest:
+                lines.append("- и ещё %d событий" % rest)
+            text = "Защита сервера %s:\n%s" % (self._server_name(), "\n".join(lines))
+            target = TG_NOTIFY_CHAT_ID or TG_OWNER_USER_ID
+            if target:
+                self._tg_send_notify(text, int(target))
+        except Exception as e:
+            log("protection report err: %s" % str(e)[:120])
+
     def onCmdUserLoggedIn(self, user):
         try:
             self.users[user.nUserID] = user
         except Exception:
             pass
+        self._prot_check_login(user)
+        if user and getattr(user, "nUserID", 0) in self._prot_bad:
+            return  # забанили — не анонсируем и не шлём приветствие ботнету
         self._notify_join_leave("+", user)
         self._welcome_join(user)
 
     def onCmdUserLoggedOut(self, user):
         try:
             self.users.pop(user.nUserID, None)
+        except Exception:
+            pass
+        try:
+            if user and user.nUserID in self._prot_bad:
+                self._prot_bad.pop(user.nUserID, None)
+                return
         except Exception:
             pass
         self._notify_join_leave("-", user)
