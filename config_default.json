@@ -71,5 +71,28 @@
         "file_name": "bot.log",
         "max_file_size": 0,
         "backup_count": 0
+    },
+    "protection": {
+        "enabled": true,
+        "guest_usernames": ["1"],
+        "notify": true,
+        "geo": {
+            "enabled": true,
+            "allow_countries": ["RU"],
+            "ranges_file": "geo/ru_ipv4.txt"
+        },
+        "nick_enabled": true,
+        "empty_nick_enabled": true,
+        "burst_enabled": true,
+        "burst": {
+            "window_sec": 30,
+            "threshold": 20,
+            "cooldown_sec": 300
+        },
+        "whitelist": {
+            "usernames": [],
+            "nicknames": [],
+            "ip_prefixes": ["127.0.0.", "10.", "192.168."]
+        }
     }
 }
