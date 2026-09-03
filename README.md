@@ -47,7 +47,7 @@
 
 Установщик `install.sh` при установке спрашивает Telegram-настройки и пишет их в `.secrets/.env` рядом с ботом: `TG_TOKEN` — токен бота-реле, `TG_OWNER_USER_ID` — твой Telegram ID (только он управляет ботом в Telegram), `TG_NOTIFY_CHAT_ID` — чат для уведомлений о входе/выходе пользователей. Аналогичные поля в `config.json` — `telegram_relay.token`, `telegram_relay.owner_user_id`, `telegram_relay.notify_chat_id`.
 
-**Музыкальный бот.** `TG_MUSIC_TOKEN` (`telegram_relay.music_token`) — токен отдельного Telegram-бота для рассылки треков подписчикам (`/sub mus`). Поле по желанию: если его не задавать, музыка в Telegram не работает, а остальной функционал бота не меняется.
+**Музыкальная рассылка.** `TG_MUSIC_TOKEN` (`telegram_relay.music_token`) — токен отдельного Telegram-бота для рассылки треков подписчикам (`/sub mus`). Поле по желанию: если его не задавать, музыка в Telegram не работает, а остальной функционал бота не меняется.
 
 **Регистратор учётных записей.** Модуль `tt_register.py` (отдельный Telegram-бот) принимает заявки на регистрацию и создаёт учётные записи на сервере TeamTalk после одобрения администратором. Секция `telegram_registration` в `config.json`:
 
@@ -189,7 +189,7 @@ TEAMTALK_TCP_PORT=10333
 TEAMTALK_UDP_PORT=10333
 TEAMTALK_USERNAME=логин
 TEAMTALK_PASSWORD=пароль
-TEAMTALK_NICKNAME=MusicBot
+TEAMTALK_NICKNAME=UniversalBot
 TEAMTALK_CHANNEL=
 TG_TOKEN=токен_телеграм_бота
 TG_OWNER_USER_ID=твой_telegram_id

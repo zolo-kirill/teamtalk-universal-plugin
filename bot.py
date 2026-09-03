@@ -116,7 +116,7 @@ def _cfg(path, env=None, default=None):
 HOST = str(_cfg("teamtalk.hostname", "TEAMTALK_HOST", "example.com"))
 TCP_PORT = int(_cfg("teamtalk.tcp_port", "TEAMTALK_TCP_PORT", 10333))
 UDP_PORT = int(_cfg("teamtalk.udp_port", "TEAMTALK_UDP_PORT", 10333))
-NICKNAME = str(_cfg("teamtalk.nickname", "TEAMTALK_NICKNAME", "MusicBot"))
+NICKNAME = str(_cfg("teamtalk.nickname", "TEAMTALK_NICKNAME", "UniversalBot"))
 USERNAME = str(_cfg("teamtalk.username", "TEAMTALK_USERNAME", "example"))
 PASSWORD = str(_cfg("teamtalk.password", "TEAMTALK_PASSWORD", ""))
 CHANNEL = str(_cfg("teamtalk.channel", "TEAMTALK_CHANNEL", ""))  # empty = root channel
