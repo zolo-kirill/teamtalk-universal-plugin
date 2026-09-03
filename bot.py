@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import bisect
+import glob
 import ipaddress
 from collections import deque
 from datetime import datetime, timedelta
@@ -264,6 +265,19 @@ def _drop_cookies(path):
             pass
 
 
+def _find_downloaded(out):
+    """Файл, который yt-dlp реально создал для префикса out.*. Скачивание идёт
+    без перекодирования в mp3, так что расширение заранее неизвестно
+    (webm/m4a/mp3/…) — ищем по префиксу. Возвращает путь или None."""
+    try:
+        for p in sorted(glob.glob(out + ".*")):
+            if os.path.isfile(p) and os.path.getsize(p) > 0:
+                return p
+    except Exception:
+        pass
+    return None
+
+
 def _looks_like_cookie_export(text):
     """Владелец прислал экспорт кук (Netscape): строка с шапкой + youtube.com."""
     t = (text or "").lstrip()
@@ -311,7 +325,7 @@ YT_JS_RUNTIME = os.environ.get("YT_JS_RUNTIME")
 if YT_JS_RUNTIME is None:
     YT_JS_RUNTIME = _cfg("runtime.yt_js_runtime", None, None)
 if not YT_JS_RUNTIME:
-    YT_JS_RUNTIME = "/home/superlisa/.local/bin/deno"
+    YT_JS_RUNTIME = shutil.which("deno") or "/home/superlisa/.local/bin/deno"
 
 # YouTube po_token provider extractor-arg; empty disables it (e.g. no bgutil server).
 YT_PO_TOKEN = os.environ.get("YT_PO_TOKEN_EXTRACTOR")
@@ -1527,11 +1541,17 @@ class MusicBot(TeamTalk5.TeamTalk):
         YouTube (player_client), с куками и анонимно. Возвращает (rc, stdout,
         stderr) первого успеха либо (None, "", последняя ошибка)."""
         last_err = ""
+        for p in glob.glob(out + ".*"):  # подчистить хвосты прошлых попыток
+            try:
+                os.unlink(p)
+            except Exception:
+                pass
         for client in self._YT_ALT_CLIENTS:
             for use_ck in (True, False):
                 cmd = list(YTDLP) + [
-                    "--no-playlist", "--no-simulate", "-x",
-                    "--audio-format", "mp3", "--audio-quality", "5",
+                    "--no-playlist", "--no-simulate",
+                    # Так же без mp3-транскода, как и основной клиент
+                    "-f", "ba/b",
                     "--remote-components", "ejs:github",
                     "--extractor-args", "youtube:player_client=%s" % client,
                     "-o", out + ".%(ext)s",
@@ -1552,7 +1572,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 finally:
                     if ck:
                         _drop_cookies(ck)
-                if rc == 0 and os.path.exists(out + ".mp3"):
+                if rc == 0 and _find_downloaded(out):
                     log("yt alt client %s ck=%d ok" % (client, use_ck))
                     return rc, stdout, stderr
                 tail = ""
@@ -1832,9 +1852,10 @@ class MusicBot(TeamTalk5.TeamTalk):
                 cmd = list(YTDLP) + [
                     "--no-playlist",
                     "--no-simulate",
-                    "-x",
-                    "--audio-format", "mp3",
-                    "--audio-quality", "5",
+                    # Без mp3-транскода: он на этом сервере жрёт ~16с на трек.
+                    # Качаем лучший аудио-поток как есть (обычно opus/webm или m4a)
+                    # и играем его через ffmpeg — в голосовом канале контейнер не важен.
+                    "-f", "ba/b",
                     "--remote-components", "ejs:github",
                     "-o", out + ".%(ext)s",
                     "--print", "%(title)s",
@@ -1851,8 +1872,8 @@ class MusicBot(TeamTalk5.TeamTalk):
                     rc, stdout, stderr = self._run_ydl(cmd, timeout=600)
                 finally:
                     _drop_cookies(ck)
-                mp3 = out + ".mp3"
-                if rc != 0 or not os.path.exists(mp3):
+                audio = _find_downloaded(out)
+                if rc != 0 or not audio:
                     err_text = (stderr or stdout or "yt-dlp failed").strip()
                     is_yt = "youtube.com" in real_url or "youtu.be" in real_url
                     if ("Video unavailable" in err_text and not canon_done
@@ -1869,9 +1890,11 @@ class MusicBot(TeamTalk5.TeamTalk):
                         arc, aout, aerr = self._yt_alt_download(out, real_url)
                         if arc == 0:
                             rc, stdout, stderr = 0, aout, aerr
+                            audio = _find_downloaded(out)
                         elif aerr:
                             err_text = aerr
-                    if rc != 0:
+                    # rc=0 без файла (молчаливый отказ YouTube) — это тоже ошибка
+                    if rc != 0 or not audio:
                         if "Sign in to confirm" in err_text or "LOGIN_REQUIRED" in err_text:
                             self.api_q.put(("download_fail", url, title, "YouTube это видео с сервера не отдаёт — просит войти в аккаунт (обычно возрастное ограничение). С серверного адреса такое не обойти, попробуй другой ролик."))
                             return
@@ -1884,7 +1907,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                         return
                 got_title = (stdout or "").strip().splitlines()
                 real_title = got_title[0] if got_title else title
-                self.api_q.put(("download_ok", url, real_title, mp3))
+                self.api_q.put(("download_ok", url, real_title, audio))
                 return
             except subprocess.TimeoutExpired:
                 if attempt < 3:
@@ -2680,6 +2703,30 @@ class MusicBot(TeamTalk5.TeamTalk):
                 log("dl copy err: %s" % str(e)[:150])
                 self._send("Ошибка: не могу подготовить файл (%s)" % str(e)[:100])
                 return
+            # Треки теперь хранятся как есть (opus/webm/m4a) без перекодирования;
+            # в канал удобнее mp3 — конвертируем копию один раз, только по /dl.
+            if ext.lower() != ".mp3":
+                self._send("Готовлю mp3…")
+                mp3tmp = os.path.join(CACHE_DIR, "upload_%d_%s.mp3" % (int(time.time() * 1000), safe))
+                try:
+                    rcc = subprocess.call(
+                        ["ffmpeg", "-y", "-i", tmp, "-vn",
+                         "-codec:a", "libmp3lame", "-q:a", "5", mp3tmp],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    rcc = 1
+                if rcc == 0 and os.path.isfile(mp3tmp) and os.path.getsize(mp3tmp) > 1024:
+                    try:
+                        os.remove(tmp)
+                    except Exception:
+                        pass
+                    tmp = mp3tmp
+                else:
+                    try:
+                        os.remove(mp3tmp)
+                    except Exception:
+                        pass
             cid = self.my_channel_id or 1
             cmd_id = TeamTalk5._DoSendFile(self._tt, cid, _b(tmp))
             if cmd_id < 0:
