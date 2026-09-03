@@ -2709,8 +2709,9 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._send("Готовлю mp3…")
                 mp3tmp = os.path.join(CACHE_DIR, "upload_%d_%s.mp3" % (int(time.time() * 1000), safe))
                 try:
+                    # nice, чтобы транскод не отъедал CPU у играющего трека
                     rcc = subprocess.call(
-                        ["ffmpeg", "-y", "-i", tmp, "-vn",
+                        ["nice", "-n", "10", "ffmpeg", "-y", "-i", tmp, "-vn",
                          "-codec:a", "libmp3lame", "-q:a", "5", mp3tmp],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     )
