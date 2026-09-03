@@ -134,7 +134,7 @@ do_install() {
         fi
         say "  !! Адрес сервера, логин и пароль обязательны. Попробуйте ещё раз."
     done
-    ask TEAMTALK_NICKNAME "Имя бота (ник)" "MusicBot"
+    ask TEAMTALK_NICKNAME "Имя бота (ник)" "UniversalBot"
     ask TEAMTALK_CHANNEL "Канал (пусто = корневой)" ""
     ask YM_TOKEN_VAL "OAuth-токен Яндекс.Музыки (пусто = пропустить)" ""
     ask TG_TOKEN "Токен Telegram-бота для реле (пусто = пропустить)" ""

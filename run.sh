@@ -1,5 +1,5 @@
 #!/bin/bash
-# Wrapper: sets SDK env and secrets, runs the TeamTalk music bot.
+# Wrapper: sets SDK env and secrets, runs the TeamTalk plugin bot.
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SDK="$DIR/sdk/tt5sdk_v5.22a_ubuntu22_x86_64"
@@ -27,7 +27,7 @@ export TEAMTALK_PASSWORD="${TEAMTALK_PASSWORD:-$TEAMTALK_BOT_PASSWORD}"
 
 cd "$DIR"
 # Wait for the TeamTalk server to be up before starting -- at boot the
-# music bot can start before tt5. The bot no longer reconnects in-process
+# plugin bot can start before tt5. The bot no longer reconnects in-process
 # (it exits on connection loss and systemd relaunches it), so gate on the
 # TCP port indefinitely.
 while ! timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/10989' 2>/dev/null; do
