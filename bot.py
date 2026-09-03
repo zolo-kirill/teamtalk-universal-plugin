@@ -113,6 +113,25 @@ def _cfg(path, env=None, default=None):
     return default
 
 
+def _save_config(patch):
+    """Deep-merge `patch` into the on-disk config (CONFIG_PATH) and rewrite the
+    file atomically, so runtime changes survive a restart."""
+    data = _load_json(CONFIG_PATH)
+    stack = [(data, patch)]
+    while stack:
+        dst, src = stack.pop()
+        for k, v in src.items():
+            if isinstance(v, dict) and isinstance(dst.get(k), dict):
+                stack.append((dst[k], v))
+            else:
+                dst[k] = v
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, CONFIG_PATH)
+
+
 HOST = str(_cfg("teamtalk.hostname", "TEAMTALK_HOST", "example.com"))
 TCP_PORT = int(_cfg("teamtalk.tcp_port", "TEAMTALK_TCP_PORT", 10333))
 UDP_PORT = int(_cfg("teamtalk.udp_port", "TEAMTALK_UDP_PORT", 10333))
@@ -134,7 +153,6 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 INBOX_DIR = os.path.join(BASE_DIR, "inbox")  # files relayed from Telegram
 os.makedirs(INBOX_DIR, exist_ok=True)
 
-NICKNAME_FILE = os.path.join(BASE_DIR, ".nickname")
 STATUS_MSG_FILE = os.path.join(BASE_DIR, ".statusmsg")
 CHANNEL_MSG_FILE = os.path.join(BASE_DIR, ".channel_msg")
 VOICE_ANNOUNCE_FILE = os.path.join(BASE_DIR, ".voice_announce")
@@ -339,12 +357,6 @@ class MusicBot(TeamTalk5.TeamTalk):
         if self.radio:
             log("radio loaded: %d stations" % len(self.radio))
         self.nickname = NICKNAME
-        try:
-            n = open(NICKNAME_FILE).read().strip()
-            if n:
-                self.nickname = n
-        except Exception:
-            pass
         self.status_msg = ""
         try:
             s = open(STATUS_MSG_FILE).read().strip()
@@ -1182,7 +1194,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             "f — избранное (f +, f + <ссылка>, f <номер>, f - <номер>)\n"
             "sv yt / sv ym — сервис\n"
             "cm — отвечать в канал/личку\n"
-            "cn <ник> — ник бота\n"
+            "cn <ник> — ник бота (в текущей сессии)\n"
+            "sc — сохранить ник/сервис/громкость в config.json\n"
             "cs <текст> — статусное сообщение бота\n"
             "очередь, статус, онлайн — кто сейчас на сервере\n"
             "sub — ссылка на подписку (команда работает в TeamTalk)\n"
@@ -2253,7 +2266,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         # --- гейт: служебные команды — только администраторам ---
         # (в TeamTalk админ = USERTYPE_ADMIN; из Telegram сюда попадают уже после _tg_allowed)
         first = cmd.split(None, 1)[0]
-        admin_only = first in ("rs", "рестарт", "restart", "перезагрузка", "cn", "cs", "sv", "svc", "сервис", "cm", "channel")
+        admin_only = first in ("rs", "рестарт", "restart", "перезагрузка", "cn", "cs", "sv", "svc", "сервис", "cm", "channel", "sc", "сохран", "сохранить", "save")
         if not admin_only:
             admin_only = cmd.startswith("lf ") or cmd.startswith("файл ") or cmd.startswith("локальный ")
         if admin_only and not self._is_admin(from_user):
@@ -2320,7 +2333,23 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._send("Не знаю сервис «%s». Доступно: yt (YouTube), ym (Яндекс.Музыка)." % svc)
             return
 
-        # --- смена ника: cn <ник> ---
+        # --- сохранить настройки сессии в config.json: sc ---
+        if cmd in ("sc", "сохран", "сохранить", "save"):
+            svc = {"yt": "YouTube", "ym": "Яндекс.Музыка"}.get(self.service, self.service)
+            try:
+                _save_config({
+                    "teamtalk": {"nickname": self.nickname},
+                    "general": {"default_service": self.service},
+                    "player": {"default_volume": int(self.volume)},
+                })
+                self._send("💾 Сохранено в config.json: ник «%s», сервис %s, громкость %d."
+                           % (self.nickname, svc, self.volume))
+            except Exception as e:
+                log("sc save err: %s" % e)
+                self._send("Не удалось сохранить в config.json: %s" % e)
+            return
+
+        # --- смена ника: cn <ник> (в текущей сессии; навсегда — /sc) ---
         if cmd == "cn" or cmd.startswith("cn "):
             parts = text.split(None, 1)
             if len(parts) < 2 or not parts[1].strip():
@@ -2331,13 +2360,8 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._send("Ник слишком длинный (максимум 255 символов).")
                 return
             self.nickname = nick
-            try:
-                with open(NICKNAME_FILE, "w") as f:
-                    f.write(nick)
-            except Exception as e:
-                log("nickname save err: %s" % e)
             self.doChangeNickname(nick)
-            self._send("✅ Ник: %s" % nick)
+            self._send("✅ Ник: %s. Чтобы сохранить навсегда — /sc" % nick)
             return
 
         # --- смена статусного сообщения: cs <текст> (пусто = очистить) ---
@@ -2591,7 +2615,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             "/v <1-100> — громкость (мгновенно)\n"
             "/cm — сообщения в канал вкл/выкл (по умолчанию ответы в личку)\n"
             "/sv yt / sv ym — сервис\n"
-            "/cn <ник> — сменить ник бота\n"
+            "/cn <ник> — сменить ник бота (в текущей сессии)\n"
+            "/sc — сохранить ник, сервис и громкость в config.json\n"
             "/cs <текст> — статусное сообщение бота (пусто — очистить)\n"
             "/lf <путь> — играть локальный файл\n"
             "/dl — загрузить играющий трек файлом в канал\n"
