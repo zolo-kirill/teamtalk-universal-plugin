@@ -273,17 +273,22 @@ def _looks_like_cookie_export(text):
 
 
 def _normalize_cookie_text(text):
-    """Whitespace-экспорт кук → tab-разделяемый Netscape-файл; вернуть строку."""
+    """Экспорт кук → tab-разделяемый Netscape-файл только с youtube-куками."""
     out = []
     for ln in (text or "").splitlines():
         if ln.startswith("#") or not ln.strip():
             continue
         f = ln.split()
+        dom = f[0].lstrip(".")
+        if dom != "youtube.com" and not dom.endswith(".youtube.com"):
+            continue
+        if len(f) == 6:
+            f.append("")  # пустое значение
         if len(f) != 7:
             raise ValueError("строка не из 7 полей: %s" % ln[:80])
         out.append("\t".join(f))
     if not out:
-        raise ValueError("пусто")
+        raise ValueError("нет youtube-кук в экспорте")
     return "# Netscape HTTP Cookie File\n" + "\n".join(out) + "\n"
 
 
@@ -887,6 +892,24 @@ class MusicBot(TeamTalk5.TeamTalk):
             return
         file_id = media.get("file_id")
         if not file_id:
+            return
+        # документ-файл с экспортом кук (например, .txt из Get cookies.txt) — принять как вход
+        if "document" in media:
+            path = self._tg_download(file_id)
+            if path:
+                try:
+                    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                        content = fh.read(200000)
+                except Exception:
+                    content = ""
+                if _looks_like_cookie_export(content):
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+                    self._tg_install_yt_cookies(msg, content)
+                    return
+                self.api_q.put(("local_file", path, (media.get("file_name") or "audio")[:80]))
             return
         title = (
             msg.get("caption")
