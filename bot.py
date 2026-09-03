@@ -263,6 +263,30 @@ def _drop_cookies(path):
         except Exception:
             pass
 
+
+def _looks_like_cookie_export(text):
+    """Владелец прислал экспорт кук (Netscape): строка с шапкой + youtube.com."""
+    t = (text or "").lstrip()
+    return t.startswith("# Netscape HTTP Cookie File") or (
+        t.startswith(".youtube.com") and "youtube.com" in t
+    )
+
+
+def _normalize_cookie_text(text):
+    """Whitespace-экспорт кук → tab-разделяемый Netscape-файл; вернуть строку."""
+    out = []
+    for ln in (text or "").splitlines():
+        if ln.startswith("#") or not ln.strip():
+            continue
+        f = ln.split()
+        if len(f) != 7:
+            raise ValueError("строка не из 7 полей: %s" % ln[:80])
+        out.append("\t".join(f))
+    if not out:
+        raise ValueError("пусто")
+    return "# Netscape HTTP Cookie File\n" + "\n".join(out) + "\n"
+
+
 # Optional Yandex Music OAuth token (config services.ym.token, else .secrets/ym_token.txt).
 YM_TOKEN = str(_cfg("services.ym.token", None, "")).strip()
 if not YM_TOKEN:
@@ -781,6 +805,10 @@ class MusicBot(TeamTalk5.TeamTalk):
             if not self._tg_allowed(msg):
                 return
             cid = (msg.get("chat") or {}).get("id")
+            # владелец прислал экспорт кук YouTube текстом — сохранить как файл кук
+            if _looks_like_cookie_export(text):
+                self._tg_install_yt_cookies(msg, text)
+                return
             # --- ответ на пересланное ЛС из TeamTalk: двухсторонние реплики ---
             self._prune_replies()
             rmid = str((msg.get("reply_to_message") or {}).get("message_id") or "")
@@ -869,6 +897,78 @@ class MusicBot(TeamTalk5.TeamTalk):
         path = self._tg_download(file_id)
         if path:
             self.api_q.put(("local_file", path, title[:80]))
+
+    def _tg_install_yt_cookies(self, msg, text):
+        """Сохранить присланный владельцем экспорт кук YouTube в файл кук."""
+        cid = (msg.get("chat") or {}).get("id")
+        if not COOKIES:
+            self._tg_send_text(cid, "Путь к кукам не задан (services.yt.cookiefile_path) — некуда сохранять.")
+            return
+        try:
+            body = _normalize_cookie_text(text)
+            from http.cookiejar import MozillaCookieJar
+            tmp = COOKIES + ".new"
+            with open(tmp, "w") as fh:
+                fh.write(body)
+            try:
+                cj = MozillaCookieJar(tmp)
+                cj.load(ignore_discard=True, ignore_expires=True)
+                names = {c.name for c in cj}
+            except Exception:
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+                self._tg_send_text(cid, "Не получилось разобрать куки. Нужен экспорт из браузера в формате Netscape (напр. расширением Get cookies.txt).")
+                return
+            os.replace(tmp, COOKIES)
+            try:
+                os.chmod(COOKIES, 0o600)
+            except Exception:
+                pass
+            logged = "LOGIN_INFO" in names
+            self._tg_send_text(
+                cid,
+                "Сохранил куки: %d шт., вход в аккаунт %s.\n"
+                "Правда, Google с серверного адреса такие сессии часто гасит — "
+                "возрастное видео может всё равно не пустить."
+                % (len(cj), "есть" if logged else "не вижу")
+            )
+        except Exception as e:
+            self._tg_send_text(cid, "Не получилось сохранить куки: %s" % str(e)[:120])
+
+    def _cmd_login(self):
+        """Статус входа в YouTube + как войти своим аккаунтом."""
+        if not COOKIES or not os.path.isfile(COOKIES):
+            self._send(
+                "В YouTube сейчас не залогинен.\n"
+                "Как войти: открой youtube.com в обычном браузере, зайди в аккаунт, "
+                "экспортируй куки расширением Get cookies.txt (формат Netscape) и пришли "
+                "весь текст боту в Telegram — сам сохраню и проверю."
+            )
+            return
+        try:
+            from http.cookiejar import MozillaCookieJar
+            cj = MozillaCookieJar(COOKIES)
+            cj.load(ignore_discard=True, ignore_expires=True)
+            names = {c.name for c in cj}
+        except Exception as e:
+            self._send("Файл кук есть, но читается с ошибкой: %s" % str(e)[:120])
+            return
+        logged = "LOGIN_INFO" in names
+        if logged:
+            self._send(
+                "Вход в YouTube есть: куки на месте (%d шт.).\n"
+                "Обновить — пришли свежий экспорт кук в Telegram. Если Google начал "
+                "просить войти, сессию с серверного адреса скорее всего погасил он."
+                % len(cj)
+            )
+        else:
+            self._send(
+                "Куки на месте (%d шт.), но входа в аккаунт в них нет — Google их гасит. "
+                "Обнови: открой youtube.com в браузере и пришли свежий экспорт кук в Telegram."
+                % len(cj)
+            )
 
     def _tg_send_text(self, chat_id, text):
         try:
@@ -1748,7 +1848,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                             err_text = aerr
                     if rc != 0:
                         if "Sign in to confirm" in err_text or "LOGIN_REQUIRED" in err_text:
-                            self.api_q.put(("download_fail", url, title, "YouTube не даёт это видео с нашего сервера (требует вход в аккаунт — обычно возрастное ограничение). Попробуй другой ролик — обычные видео играют."))
+                            self.api_q.put(("download_fail", url, title, "YouTube это видео с сервера не отдаёт — просит войти в аккаунт (обычно возрастное ограничение). С серверного адреса такое не обойти, попробуй другой ролик."))
                             return
                         err_msg = (err_text.splitlines()[-1] if err_text else "yt-dlp failed")[:300]
                         if attempt < 3:
@@ -2379,7 +2479,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         # --- гейт: служебные команды — только администраторам ---
         # (в TeamTalk админ = USERTYPE_ADMIN; из Telegram сюда попадают уже после _tg_allowed)
         first = cmd.split(None, 1)[0]
-        admin_only = first in ("rs", "restart", "cn", "cs", "sv", "svc", "cm", "channel", "sc", "save")
+        admin_only = first in ("rs", "restart", "cn", "cs", "sv", "svc", "cm", "channel", "sc", "save", "login")
         if not admin_only:
             admin_only = cmd.startswith("lf ")
         if admin_only and not self._is_admin(from_user):
@@ -2419,6 +2519,11 @@ class MusicBot(TeamTalk5.TeamTalk):
             self.voice_announce = not self.voice_announce
             self._save_voice_announce()
             self._send("Озвучка названий: %s" % ("вкл 🔊" if self.voice_announce else "выкл ⭕"))
+            return
+
+        # --- вход в YouTube своим аккаунтом: login (статус + как войти) ---
+        if cmd == "login":
+            self._cmd_login()
             return
 
         # --- перезапуск бота: rs ---
