@@ -56,6 +56,11 @@
         "admin_password": "",
         "admin_nickname": "регистратор"
     },
+    "account_watch": {
+        "enabled": true,
+        "interval_sec": 10,
+        "notify_owner": true
+    },
     "guard": {
         "enabled": true,
         "guest_logins": ["1"],
