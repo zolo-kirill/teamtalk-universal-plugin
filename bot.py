@@ -206,6 +206,10 @@ TG_NOTIFY_CHAT_ID = int(_cfg("telegram.notify_chat_id", "TG_NOTIFY_CHAT_ID", 0) 
 TG_NOTIFY_SERVER = str(_cfg("telegram.server_display_name", "TG_NOTIFY_SERVER_NAME", "")).strip()  # пусто = брать имя сервера из TeamTalk
 TG_NOTIFY_IGNORE = {u.strip().lower() for u in (_cfg("telegram.ignore_usernames", None, []) or []) if u.strip()}
 TG_NOTIFY_IGNORE.add("bot_admin")  # все боты на одной админ-учётке — их не анонсируем
+# Исключения по НИКУ (а не логину): таких не приветствуем сетевым сообщением
+# и не анонсируем вход/выход. Нужно, когда учётка частая или служебная и логин
+# общий (гости), а замолчать надо конкретного по имени в чате (напр. «Stats»).
+TG_NOTIFY_IGNORE_NICKS = {n.strip().lower() for n in (_cfg("telegram.ignore_nicks", None, []) or []) if n.strip()}
 
 # Приветствие при входе пользователя на сервер: просьба ознакомиться с правилами
 # (welcome.rules_text в config.json; пусто — стандартная строка).
@@ -3349,6 +3353,20 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception:
             return False
 
+    def _join_quiet(self, user):
+        """Учётка из исключений: такую не приветствуем и не анонсируем вход/выход.
+        Совпадает по логину (ignore_usernames) или по нику (ignore_nicks)."""
+        try:
+            uname = (self._tt_field(user, "szUsername") or "").strip().lower()
+            if uname in TG_NOTIFY_IGNORE:
+                return True
+            nick = (self._tt_field(user, "szNickname") or "").strip().lower()
+            if nick and nick in TG_NOTIFY_IGNORE_NICKS:
+                return True
+        except Exception:
+            pass
+        return False
+
     def _notify_join_leave(self, sign, user):
         """Announce a user logging in (+)/out (-): владельцу и всем подписчикам."""
         try:
@@ -3362,8 +3380,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             nick = self._tt_field(user, "szNickname") or self._tt_field(user, "szUsername")
             if not nick:
                 return
-            uname = self._tt_field(user, "szUsername").lower()
-            if uname in TG_NOTIFY_IGNORE:
+            if self._join_quiet(user):
                 return
             female = self._user_female(user)
             if sign == "+":
@@ -3404,9 +3421,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             nick = self._tt_field(user, "szNickname") or self._tt_field(user, "szUsername")
             if not nick:
                 return
-            uname = self._tt_field(user, "szUsername").lower()
-            if uname in TG_NOTIFY_IGNORE:
-                return
+            if self._join_quiet(user):
+                return  # исключение: сетевое приветствие этому не шлём
             ip = self._tt_field(user, "szIPAddress") or ""
             threading.Thread(target=self._welcome_do, args=(nick, ip), daemon=True).start()
         except Exception as e:
