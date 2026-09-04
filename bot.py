@@ -211,6 +211,15 @@ TG_NOTIFY_IGNORE.add("bot_admin")  # все боты на одной админ-
 # общий (гости), а замолчать надо конкретного по имени в чате (напр. «Stats»).
 TG_NOTIFY_IGNORE_NICKS = {n.strip().lower() for n in (_cfg("telegram.ignore_nicks", None, []) or []) if n.strip()}
 
+# Слежение за правами учёток (account_watch): если у учётки изменились права —
+# добавили/убрали разрешение или сменился тип — всех, кто сейчас залогинен под
+# ней, выкидываем, чтобы перезашли и получили новые права. Сервер применяет
+# права учётки при логине; живая сессия держит старые до переподключения.
+ACC_WATCH_ENABLED  = bool(_cfg("account_watch.enabled", None, True))
+ACC_WATCH_INTERVAL = int(_cfg("account_watch.interval_sec", None, 10) or 10)
+ACC_WATCH_PAGE     = int(_cfg("account_watch.page_size", None, 50) or 50)
+ACC_WATCH_NOTIFY   = bool(_cfg("account_watch.notify_owner", None, True))
+
 # Приветствие при входе пользователя на сервер: просьба ознакомиться с правилами
 # (welcome.rules_text в config.json; пусто — стандартная строка).
 WELCOME_RULES = str(_cfg("welcome.rules_text", None, "") or "").strip()
@@ -525,6 +534,15 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._prot_q = queue.Queue()
         self._prot_bad = {}  # uid -> причина: этих не анонсируем (вход/приветствие)
         self._prot_geo_off_warned = False
+        # ---- слежение за правами учёток (account_watch) ----
+        self._acc_snap = None  # {username_lower: (uUserType, uUserRights)} — базовая линия
+        self._acc_next = 0.0   # когда следующий опрос (main thread)
+        self._acc_busy = False  # идёт ли сейчас сбор списка учёток
+        self._acc_cmd = None   # cmd id текущего doListUserAccounts
+        self._acc_buf = []     # собранные за проход UserAccount
+        self._acc_page_cnt = 0  # сколько пришло за текущую страницу
+        self._acc_started = 0.0  # когда начали текущий сбор (сторож от зависания)
+        self._acc_failed_once = False  # список недоступен (нет админ-прав) — выключили
         if self._prot_cfg.get("enabled") and self._prot_cfg.get("geo_enabled"):
             self._prot_load_ranges()
         self.pending_replies = self._load_replies()  # двухсторонние реплики: tg message_id → данные пользователя
@@ -3779,6 +3797,136 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception as e:
             log("protection report err: %s" % str(e)[:120])
 
+    # ----- слежение за правами учёток (account_watch) -------------------
+    # TeamTalk не шлёт боту событий «чужой админ поменял учётку» — события
+    # USERACCOUNT приходят только как ответ на собственные команды. Поэтому
+    # раз в interval опрашиваем список учёток и сверяем с прошлым состоянием.
+    def _acc_sig(self, account):
+        """Права учётки, по которым отличаем «изменилось»: тип + маска прав."""
+        try:
+            return (int(getattr(account, "uUserType", 0) or 0),
+                    int(getattr(account, "uUserRights", 0) or 0))
+        except Exception:
+            return (0, 0)
+
+    def _acc_tick(self):
+        """Раз в интервал начинаем опрос списка учёток (main thread, из _run_once)."""
+        try:
+            if not ACC_WATCH_ENABLED or self._acc_failed_once:
+                return
+            if self._acc_busy:
+                # сторож: список не завершился за 30с (нет success) — сброс
+                if time.time() - self._acc_started > 30:
+                    self._acc_busy = False
+                    self._acc_cmd = None
+                    self._acc_next = time.time() + ACC_WATCH_INTERVAL
+                return
+            if not self.logged_in or not self.my_user_id:
+                return
+            if time.time() < self._acc_next:
+                return
+            self._acc_next = time.time() + ACC_WATCH_INTERVAL
+            self._acc_start_list()
+        except Exception as e:
+            log("account watch tick err: %s" % str(e)[:120])
+
+    def _acc_start_list(self):
+        """Запрашиваем первую страницу учёток; дальше добираем в _acc_page_done."""
+        try:
+            self._acc_busy = True
+            self._acc_buf = []
+            self._acc_page_cnt = 0
+            self._acc_started = time.time()
+            cid = self.doListUserAccounts(0, ACC_WATCH_PAGE)
+            if cid <= 0:
+                self._acc_busy = False
+                log("account watch: список учёток не запустился (cmd=%d)" % cid)
+                return
+            self._acc_cmd = cid
+        except Exception as e:
+            self._acc_busy = False
+            log("account watch start err: %s" % str(e)[:120])
+
+    def _acc_page_done(self):
+        """Страница списка получена целиком (onCmdSuccess по нашему cmd)."""
+        try:
+            if self._acc_page_cnt >= ACC_WATCH_PAGE:
+                # возможно, есть ещё — запрашиваем следующую страницу с этого места
+                start = len(self._acc_buf)
+                cid = self.doListUserAccounts(start, ACC_WATCH_PAGE)
+                if cid <= 0:
+                    self._acc_busy = False
+                    return
+                self._acc_cmd = cid
+                self._acc_page_cnt = 0
+                return
+            accounts = self._acc_buf
+            self._acc_busy = False
+            self._acc_process(accounts)
+        except Exception as e:
+            self._acc_busy = False
+            log("account watch page err: %s" % str(e)[:120])
+
+    def _acc_process(self, accounts):
+        """Свежий список учёток против базовой линии: у кого изменились права —
+        выкидываем тех, кто сейчас залогинен под ними (чтобы перезашли)."""
+        try:
+            snap = {}
+            for a in accounts:
+                uname = self._tt_field(a, "szUsername").lower()
+                if not uname:
+                    continue
+                snap[uname] = self._acc_sig(a)
+            prev = self._acc_snap
+            self._acc_snap = snap
+            if prev is None:
+                log("account watch: базовая линия — %d учёток" % len(snap))
+                return  # первый проход: только запоминаем, ничего не кикаем
+            changed = {u for u, s in snap.items() if u in prev and prev[u] != s}
+            changed |= {u for u in prev if u not in snap}  # учётку удалили
+            if not changed:
+                return
+            by_uname = {}  # uname -> [(uid, nick)] кто сидит под изменённой учёткой
+            try:
+                for uid, user in list(self.users.items()):
+                    uname = self._tt_field(user, "szUsername").lower()
+                    if not uname or uname not in changed:
+                        continue
+                    if uid == self.my_user_id:
+                        continue
+                    if uname == USERNAME.lower():
+                        continue  # свою учётку (бот + регистратор) не кикаем
+                    nick = self._tt_field(user, "szNickname") or ("id%d" % uid)
+                    by_uname.setdefault(uname, []).append((uid, nick))
+            except Exception:
+                pass
+            if not by_uname:
+                return
+            for uname, targets in by_uname.items():
+                for uid, nick in targets:
+                    try:
+                        self.doKickUser(uid, 0)
+                        log("account watch: права учётки «%s» изменились — кик %s (id %d)"
+                            % (uname, nick, uid))
+                    except Exception as e:
+                        log("account watch kick err: %s" % str(e)[:120])
+            if ACC_WATCH_NOTIFY and (TG_NOTIFY_CHAT_ID or TG_OWNER_USER_ID):
+                lines = ["- «%s»: %s" % (u, ", ".join(n for _, n in by_uname[u]))
+                         for u in sorted(by_uname)]
+                text = "Права учётки изменились — выкинул, чтобы перезашли:\n%s" % "\n".join(lines)
+                self._tg_send_notify(text, int(TG_NOTIFY_CHAT_ID or TG_OWNER_USER_ID))
+        except Exception as e:
+            log("account watch process err: %s" % str(e)[:150])
+
+    def onUserAccount(self, useraccount):
+        """Пришёл один UserAccount в ответ на наш список — копим в буфер."""
+        try:
+            if self._acc_busy and useraccount:
+                self._acc_buf.append(useraccount)
+                self._acc_page_cnt += 1
+        except Exception as e:
+            log("account watch recv err: %s" % str(e)[:120])
+
     def onCmdUserLoggedIn(self, user):
         try:
             self.users[user.nUserID] = user
@@ -3821,6 +3969,10 @@ class MusicBot(TeamTalk5.TeamTalk):
     def onCmdSuccess(self, cmdId):
         if self._dl_cmd_id is not None and cmdId == self._dl_cmd_id:
             self._dl_finish(True)
+            return
+        if self._acc_cmd is not None and cmdId == self._acc_cmd:
+            self._acc_cmd = None
+            self._acc_page_done()
 
     def onCmdError(self, cmdId, errmsg):
         msg = errmsg.szErrorMsg if errmsg else ""
@@ -3829,6 +3981,14 @@ class MusicBot(TeamTalk5.TeamTalk):
         log("cmd error (cmd %d): %s" % (cmdId, msg))
         if self._dl_cmd_id is not None and cmdId == self._dl_cmd_id:
             self._dl_finish(False, msg)
+            return
+        if self._acc_cmd is not None and cmdId == self._acc_cmd:
+            # список учёток не дали (нет админ-прав?) — тихо выключаем слежение
+            self._acc_cmd = None
+            self._acc_busy = False
+            self._acc_next = time.time() + 60
+            self._acc_failed_once = True
+            log("account watch: список учёток недоступен (%s) — слежение выключено" % msg)
             return
         now = time.time()
         if now - self._last_err_sent > 5:
@@ -3888,6 +4048,7 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _run_once(self):
         self.runEventLoop(50)
+        self._acc_tick()
         while True:
             try:
                 item = self.api_q.get_nowait()
