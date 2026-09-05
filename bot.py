@@ -466,6 +466,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.voice_proc = None
         self.voice_offset_base = 0
         self.voice_started_at = 0
+        self._voice_run = 0  # поколение голоса: растёт при каждом старте/останове
         # last search result list for n/b switching and auto-advance
         self.search_results = []
         self.search_index = 0
@@ -1974,16 +1975,17 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _start_voice(self, path, offset_ms=0):
         self._stop_voice()
+        run = self._voice_run  # поколение уже увеличено в _stop_voice
         self.voice_stop.clear()
         self.voice_offset_base = int(offset_ms)
         self.voice_started_at = time.time()
         t = threading.Thread(
-            target=self._voice_worker, args=(path, int(offset_ms)), daemon=True
+            target=self._voice_worker, args=(path, int(offset_ms), run), daemon=True
         )
         self.voice_thread = t
         t.start()
 
-    def _voice_worker(self, path, offset_ms):
+    def _voice_worker(self, path, offset_ms, run):
         """Play audio to TeamTalk as voice.
 
         With PULSE_SINK set, ffmpeg plays the track into that PulseAudio sink
@@ -2108,9 +2110,10 @@ class MusicBot(TeamTalk5.TeamTalk):
                     pass
             self.voice_proc = None
             if finished:
-                self.api_q.put(("voice_finished", path))
+                self.api_q.put(("voice_finished", run, path))
 
     def _stop_voice(self):
+        self._voice_run += 1  # инвалидировать поколение: устаревшие voice_finished игнорируются
         self.voice_stop.set()
         t = self.voice_thread
         self.voice_thread = None
@@ -2123,21 +2126,26 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _tts_announce(self, text):
         """Синтезировать озвучку текста (Google Translate TTS) в файл. Вернуть путь или None."""
-        try:
-            url = ("https://translate.google.com/translate_tts?ie=UTF-8&tl=ru&client=tw-ob&q="
-                   + urllib.parse.quote(text))
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=20) as r:
-                data = r.read()
-            if not data:
-                return None
-            path = os.path.join(CACHE_DIR, "announce_%d.mp3" % int(time.time() * 1000))
-            with open(path, "wb") as f:
-                f.write(data)
-            return path
-        except Exception as e:
-            log("tts announce err: %s" % str(e)[:120])
-            return None
+        # Таймаут короткий (8 с): синтез идёт в фоновом потоке, но тянуть паузу
+        # дольше бессмысленно — проще сыграть трек без озвучки. Проверяем, что
+        # пришёл именно mp3 (Google иногда отвечает страницей-заглушкой), и при
+        # сбое пробуем ещё раз.
+        for attempt in (0, 1):
+            try:
+                url = ("https://translate.google.com/translate_tts?ie=UTF-8&tl=ru&client=tw-ob&q="
+                       + urllib.parse.quote(text))
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    data = r.read()
+                if data[:3] == b"ID3" or (data[:1] == b"\xff" and (data[1:2] and (data[1] & 0xE0) == 0xE0)):
+                    path = os.path.join(CACHE_DIR, "announce_%d.mp3" % int(time.time() * 1000))
+                    with open(path, "wb") as f:
+                        f.write(data)
+                    return path
+                log("tts announce: не mp3 (%d б, попытка %d)" % (len(data), attempt))
+            except Exception as e:
+                log("tts announce err: %s (попытка %d)" % (str(e)[:120], attempt))
+        return None
 
     def _play_file(self, url, title, path):
         self.current_orig = path
@@ -2151,13 +2159,27 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._send("▶ Сейчас играет: %s" % title)
         self._set_status("Playing: %s" % title)
         if self.voice_announce and title:
-            ann = self._tts_announce("Сейчас играет: %s" % title)
-            if ann:
-                self._announce_pending = (path, 0)
-                self._start_voice(ann, 0)
-                return
+            # Озвучку синтезируем в фоновом потоке: запрос к Google занимает до
+            # 8 с, держать главный цикл на это время заблокированным нельзя —
+            # бот перестанет отвечать на команды. Пока идёт синтез, трек ждёт
+            # (_announce_pending), главный поток остаётся свободным.
+            self._stop_voice()  # остановить текущий трек: его voice_finished не должен гасить pending
+            self._announce_pending = (path, 0)
+            t = threading.Thread(
+                target=self._announce_worker, args=(url, title, path), daemon=True
+            )
+            t.start()
+            return
         self._start_voice(path, 0)
         self._music_broadcast(path, title)  # раздать трек подписчикам музыки (в фоне)
+
+    def _announce_worker(self, url, title, path):
+        """Синтез озвучки названия вне главного потока. Итог — событие в api_q."""
+        ann = self._tts_announce("Сейчас играет: %s" % title)
+        if ann:
+            self.api_q.put(("announce_ready", path, ann))
+        else:
+            self.api_q.put(("announce_failed", path, title))
 
     def _play_local(self, path, title):
         """Play a local file (no download) — used for files sent via Telegram."""
@@ -4165,12 +4187,38 @@ class MusicBot(TeamTalk5.TeamTalk):
                 elif kind == "advance":
                     self._advance(silent=True)
                 elif kind == "voice_finished":
+                    _, run, path = item
+                    if run != self._voice_run:
+                        continue  # устаревшее событие остановленного/заменённого голоса
                     if self._announce_pending:
-                        path, offset = self._announce_pending
+                        tpath, offset = self._announce_pending
                         self._announce_pending = None
-                        self._start_voice(path, offset)
+                        # закончилась озвучка названия — стартуем сам трек
+                        self._start_voice(tpath, offset)
+                        if self.current:
+                            self._music_broadcast(tpath, self.current[1])
                     else:
                         self._advance(silent=True)
+                elif kind == "announce_ready":
+                    _, path, ann = item
+                    pending = self._announce_pending
+                    if not pending or pending[0] != path:
+                        # трек остановлен/заменён, пока шёл синтез — озвучка не нужна
+                        try:
+                            os.remove(ann)
+                        except Exception:
+                            pass
+                        continue
+                    self._start_voice(ann, 0)  # озвучка; трек стартует по её завершении
+                elif kind == "announce_failed":
+                    _, path, title = item
+                    pending = self._announce_pending
+                    if not pending or pending[0] != path:
+                        continue  # трек уже неактуален
+                    self._announce_pending = None
+                    self._start_voice(path, 0)  # озвучка не вышла — играем трек сразу
+                    if self.current and self.current[1] == title:
+                        self._music_broadcast(path, title)
                 elif kind == "voice_error":
                     _, msg = item
                     self._send("⚠ Голос: %s" % msg)
