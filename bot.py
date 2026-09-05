@@ -1312,10 +1312,27 @@ class MusicBot(TeamTalk5.TeamTalk):
             nick = self._tt_field(u, "szNickname") if u else "id %s" % target
             ip = self._tt_field(u, "szIPAddress") if u else ""
             try:
-                # кикаем серверно (канал 0 = весь сервер) и банем IP, чтобы не вернулся
-                self.doKickUser(target, 0)
+                # бан по uid ДО кика — сервер знает сессию и сам впишет ник/username
+                # в бан-лист; doBanIPAddress по голому IP оставляет их пустыми.
+                banned = False
                 if ip:
-                    self.doBanIPAddress(_b(ip), 0)
+                    try:
+                        self.doBanUserEx(target, 0x02)  # BANTYPE_IPADDR
+                        banned = True
+                    except Exception as e:
+                        log("ban userex err: %s" % e)
+                    if not banned:
+                        try:
+                            self.doBanIPAddress(_b(ip), 0)
+                            banned = True
+                        except Exception as e:
+                            log("ban ipaddr err: %s" % e)
+                # кикаем серверно (канал 0 = весь сервер) на случай, если ещё в сети
+                try:
+                    self.doKickUser(target, 0)
+                except Exception:
+                    pass
+                if ip and banned:
                     self._banned_ips.add(ip)
                     self.bans[str(target)] = {
                         "nick": nick,
@@ -1325,8 +1342,10 @@ class MusicBot(TeamTalk5.TeamTalk):
                     }
                     self._save_bans()
                     self._tg_answer_cb(qid, "Забанен: %s" % nick)
-                else:
+                elif not ip:
                     self._tg_answer_cb(qid, "Кикнут: %s (IP не виден — серверный бан не выдан)" % nick)
+                else:
+                    self._tg_answer_cb(qid, "Не удалось забанить: %s" % nick, alert=True)
             except Exception as e:
                 log("ban err: %s" % e)
                 self._tg_answer_cb(qid, "Не удалось забанить.", alert=True)
@@ -3708,21 +3727,30 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._prot_q.task_done()
 
     def _prot_ban_one(self, uid, nick, username, ip, reason, kick_only):
+        banned = False
+        if not kick_only and ip and ip not in self._banned_ips:
+            try:
+                # бан по uid ДО кика — сервер знает сессию и сам впишет ник/username
+                # в бан-лист (doBanIPAddress по голому IP пишет пустые поля)
+                self.doBanUserEx(uid, 0x02)  # BANTYPE_IPADDR
+                banned = True
+            except Exception as e:
+                log("protection userban err: %s" % str(e)[:120])
+            if not banned:
+                try:
+                    self.doBanIPAddress(_b(ip), 0)
+                    banned = True
+                except Exception as e:
+                    log("protection ipban err: %s" % str(e)[:120])
+                    self._prot_note("не забанить %s: %s" % (ip, str(e)[:90]))
+                    return
         try:
             self.doKickUser(uid, 0)
         except Exception as e:
             log("protection kick err: %s" % str(e)[:120])
-        if kick_only or not ip:
+        if kick_only or not ip or not banned:
+            # кик без бана (kick_only/нет IP) либо IP уже в бане — просто событие
             self._prot_note(reason)
-            return
-        if ip in self._banned_ips:
-            self._prot_note(reason)  # IP уже в бане — считаем событие, банить нечего
-            return
-        try:
-            self.doBanIPAddress(_b(ip), 0)
-        except Exception as e:
-            log("protection ipban err: %s" % str(e)[:120])
-            self._prot_note("не забанить %s: %s" % (ip, str(e)[:90]))
             return
         self._banned_ips.add(ip)
         self.bans[str(uid)] = {
@@ -3979,6 +4007,25 @@ class MusicBot(TeamTalk5.TeamTalk):
         if isinstance(msg, bytes):
             msg = msg.decode("utf-8", "ignore")
         log("cmd error (cmd %d): %s" % (cmdId, msg))
+        # Серверный login-delay (flood) режет повторный вход, когда второй
+        # клиент с того же IP (регистратор) успел залогиниться первым.
+        # Не застреваем в connected-but-not-logged-in: ждём и повторяем логин.
+        low = msg.lower() if isinstance(msg, str) else ""
+        if cmdId == 1 and not self.logged_in and ("too fast" in low or "flood" in low):
+            n = getattr(self, "_login_flood_retries", 0) + 1
+            self._login_flood_retries = n
+            if n >= 5:
+                log("login flood: 5 попыток не хватило, полный рестарт")
+                threading.Thread(target=_restart_bot_soon, daemon=True).start()
+                return
+            delay = 3.0
+            log("login flood (попытка %d/5): повтор логина через %.1fs" % (n, delay))
+            def _retry_login():
+                time.sleep(delay)
+                if not self.logged_in:
+                    self._login()
+            threading.Thread(target=_retry_login, daemon=True).start()
+            return
         if self._dl_cmd_id is not None and cmdId == self._dl_cmd_id:
             self._dl_finish(False, msg)
             return
