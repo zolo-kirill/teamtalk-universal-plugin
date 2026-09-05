@@ -45,6 +45,26 @@ def _b(s):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+# ---- прокси для запросов к Telegram API ----
+# Дата-центр сервера DPI-блокирует исходящие TCP к подсетям Telegram, поэтому
+# запросы к api.telegram.org идут через локальный мост (TG_PROXY), всё остальное
+# (yandex-music, rutube и пр.) — напрямую, без прокси.
+TG_PROXY = os.environ.get("TG_PROXY", "").strip()
+_TG_OPENER = None
+
+
+def _tg_urlopen(req, timeout):
+    """urlopen: если задан TG_PROXY — запрос к TG API идёт через него."""
+    global _TG_OPENER
+    if TG_PROXY:
+        if _TG_OPENER is None:
+            _TG_OPENER = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": TG_PROXY, "https": TG_PROXY})
+            )
+        return _TG_OPENER.open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
 # ---- признаки ботнет-клиентов (массовые входы «мёртвых» ботов) ----
 # Флуд-ники вида «🤖 Shadow_Pilot_46»: эмодзи + латинское слово_слово_число.
 # Кириллические ники и одиночные подчёркивания («kirill_mobile») не трогаем.
@@ -501,6 +521,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._tg_offset = 0
         self._tg_reply_chat = None  # set while handling a Telegram command → mirror replies
         self._pending_msg = None  # ожидание текста для отправки ЛС в TeamTalk: {cid, uid, nick}
+        self._await_cookies = 0.0  # deadline режима приёма кук после /cookies (time.time); 0 = выключен
         self._ready_time = None  # when the bot finished joining — for join/leave notify grace
         # подписки на уведомления: /sub в TeamTalk → ссылка → активация в Telegram
         self.users = {}  # nUserID -> User (кто сейчас на сервере)
@@ -649,7 +670,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         url = "https://api.telegram.org/bot%s/%s" % (TG_TOKEN, method)
         data = urllib.parse.urlencode(params).encode()
         req = urllib.request.Request(url, data=data, method="POST")
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with _tg_urlopen(req, timeout=60) as r:
             return json.loads(r.read().decode())
 
     def _tg_poll(self):
@@ -669,7 +690,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         url = "https://api.telegram.org/bot%s/%s" % (TG_MUSIC_TOKEN, method)
         data = urllib.parse.urlencode(params).encode()
         req = urllib.request.Request(url, data=data, method="POST")
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with _tg_urlopen(req, timeout=60) as r:
             return json.loads(r.read().decode())
 
     def _music_bot_username(self):
@@ -711,7 +732,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             url = "https://api.telegram.org/bot%s/sendDocument" % TG_MUSIC_TOKEN
             req = urllib.request.Request(url, data=body, method="POST")
             req.add_header("Content-Type", "multipart/form-data; boundary=%s" % boundary)
-            with urllib.request.urlopen(req, timeout=180) as r:
+            with _tg_urlopen(req, timeout=180) as r:
                 return json.loads(r.read().decode())
         except Exception as e:
             log("music send doc err: %s" % str(e)[:150])
@@ -751,18 +772,18 @@ class MusicBot(TeamTalk5.TeamTalk):
             rec = self.mus_pending.pop(token, None)
             self._save_music_subs()
             if not rec:
-                self._music_send_text(int(cid), "Ссылка недействительна или истекла. Отправь sub mus заново в TeamTalk.")
+                self._music_send_text(int(cid), "Ссылка недействительна или истекла. Повторите запрос sub mus в TeamTalk.")
                 return
             rec["subscribed_at"] = time.time()
             self.music_subs[cid] = rec
             self._save_music_subs()
-            who = rec.get("nick") or rec.get("username") or "твой аккаунт"
-            self._music_send_text(int(cid), "✅ Подписан на музыку (%s). Каждый сыгранный трек буду присылать сюда. Отписаться — /unsub_mus." % who)
+            who = rec.get("nick") or rec.get("username") or "аккаунт"
+            self._music_send_text(int(cid), "Подписка на музыку оформлена (%s). Каждый сыгранный трек будет приходить в этот чат. Отписка: /unsub_mus." % who)
             return
         if cid in self.music_subs:
-            self._music_send_text(int(cid), "Ты подписан на музыку. Треки приходят сюда. Отписаться — /unsub_mus.")
+            self._music_send_text(int(cid), "Подписка на музыку активна. Треки приходят в этот чат. Отписка — /unsub_mus.")
         else:
-            self._music_send_text(int(cid), "Это бот для подписки на музыку. На сервере TeamTalk отправь боту личное сообщение «sub mus» — получишь ссылку на подписку.")
+            self._music_send_text(int(cid), "Это бот для подписки на музыку. На сервере TeamTalk отправьте боту личное сообщение «sub mus» — придёт ссылка на подписку.")
 
     def _music_broadcast(self, path, title):
         """Разослать играющий трек всем подписчикам музыки (в фоне, не блокируя музыку)."""
@@ -936,6 +957,20 @@ class MusicBot(TeamTalk5.TeamTalk):
         if "document" in media:
             path = self._tg_download(file_id)
             if path:
+                # режим приёма кук (владелец отправил /cookies): любой документ трактуем как
+                # экспорт кук, не проигрываем; даже если эвристика по шапке не сработала
+                if self._tg_cookies_mode_active() and self._tg_allowed(msg):
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                            content = fh.read(200000)
+                    except Exception:
+                        content = ""
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+                    self._tg_install_yt_cookies(msg, content)
+                    return
                 try:
                     with open(path, "r", encoding="utf-8", errors="replace") as fh:
                         content = fh.read(200000)
@@ -960,9 +995,19 @@ class MusicBot(TeamTalk5.TeamTalk):
         if path:
             self.api_q.put(("local_file", path, title[:80]))
 
+    def _tg_cookies_mode_active(self):
+        """Режим ожидания файла кук активен? Гасится сам по истечении времени."""
+        if not self._await_cookies:
+            return False
+        if time.time() > self._await_cookies:
+            self._await_cookies = 0.0
+            return False
+        return True
+
     def _tg_install_yt_cookies(self, msg, text):
         """Сохранить присланный владельцем экспорт кук YouTube в файл кук."""
         cid = (msg.get("chat") or {}).get("id")
+        self._await_cookies = 0.0  # режим ожидания завершён в любом случае
         if not COOKIES:
             self._tg_send_text(cid, "Путь к кукам не задан (services.yt.cookiefile_path) — некуда сохранять.")
             return
@@ -981,7 +1026,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                     os.remove(tmp)
                 except Exception:
                     pass
-                self._tg_send_text(cid, "Не получилось разобрать куки. Нужен экспорт из браузера в формате Netscape (напр. расширением Get cookies.txt).")
+                self._tg_send_text(cid, "Файл не распознан как экспорт кук. Нужен экспорт из браузера в формате Netscape (расширение Get cookies.txt).")
                 return
             os.replace(tmp, COOKIES)
             try:
@@ -991,22 +1036,22 @@ class MusicBot(TeamTalk5.TeamTalk):
             logged = "LOGIN_INFO" in names
             self._tg_send_text(
                 cid,
-                "Сохранил куки: %d шт., вход в аккаунт %s.\n"
-                "Правда, Google с серверного адреса такие сессии часто гасит — "
-                "возрастное видео может всё равно не пустить."
-                % (len(cj), "есть" if logged else "не вижу")
+                "Куки сохранены: %d шт., вход в аккаунт %s.\n"
+                "Выполняется перезапуск для применения."
+                % (len(cj), "есть" if logged else "отсутствует")
             )
+            threading.Thread(target=_restart_bot_soon, daemon=True).start()
         except Exception as e:
             self._tg_send_text(cid, "Не получилось сохранить куки: %s" % str(e)[:120])
 
     def _cmd_login(self):
-        """Статус входа в YouTube + как войти своим аккаунтом."""
+        """Статус входа в YouTube и порядок обновления кук."""
         if not COOKIES or not os.path.isfile(COOKIES):
             self._send(
-                "В YouTube сейчас не залогинен.\n"
-                "Как войти: открой youtube.com в обычном браузере, зайди в аккаунт, "
-                "экспортируй куки расширением Get cookies.txt (формат Netscape) и пришли "
-                "весь текст боту в Telegram — сам сохраню и проверю."
+                "Вход в YouTube не выполнен.\n"
+                "Порядок входа: откройте youtube.com в браузере, войдите в аккаунт, "
+                "экспортируйте куки расширением Get cookies.txt (формат Netscape), затем "
+                "отправьте команду /cookies и пришлите файл кук боту в Telegram."
             )
             return
         try:
@@ -1015,20 +1060,21 @@ class MusicBot(TeamTalk5.TeamTalk):
             cj.load(ignore_discard=True, ignore_expires=True)
             names = {c.name for c in cj}
         except Exception as e:
-            self._send("Файл кук есть, но читается с ошибкой: %s" % str(e)[:120])
+            self._send("Файл кук повреждён: %s" % str(e)[:120])
             return
         logged = "LOGIN_INFO" in names
         if logged:
             self._send(
-                "Вход в YouTube есть: куки на месте (%d шт.).\n"
-                "Обновить — пришли свежий экспорт кук в Telegram. Если Google начал "
-                "просить войти, сессию с серверного адреса скорее всего погасил он."
+                "Вход в YouTube активен: кук %d шт.\n"
+                "Для обновления отправьте /cookies и пришлите свежий файл кук в Telegram."
                 % len(cj)
             )
         else:
             self._send(
-                "Куки на месте (%d шт.), но входа в аккаунт в них нет — Google их гасит. "
-                "Обнови: открой youtube.com в браузере и пришли свежий экспорт кук в Telegram."
+                "Куки сохранены (%d шт.), но вход в аккаунт отсутствует — Google "
+                "аннулирует сессии с серверного адреса.\n"
+                "Порядок обновления: отправьте /cookies и пришлите файл свежего "
+                "экспорта кук в Telegram."
                 % len(cj)
             )
 
@@ -1182,7 +1228,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             lines.append("Статус: %s" % status[:50])
         if ip:
             lines.append("IP: %s" % ip)
-        kb = [[{"text": "✉ Написать ЛС", "callback_data": "online:msg:%s" % uid}]]
+        kb = [[{"text": "Написать ЛС", "callback_data": "online:msg:%s" % uid}]]
         if not (int(getattr(u, "uUserType", 0) or 0) & 2):  # админов кикать/банить нельзя
             kb.append([{"text": "Кикнуть", "callback_data": "kick:do:%s" % uid},
                        {"text": "Забанить", "callback_data": "ban:do:%s" % uid}])
@@ -1290,8 +1336,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             nick = (self._tt_field(u, "szNickname") or self._tt_field(u, "szUsername")
                     or "id %s" % uid) if u else "id %s" % uid
             self._pending_msg = {"cid": cid, "uid": uid, "nick": nick}
-            self._tg_answer_cb(qid, "Напиши текст сообщения.")
-            self._tg_send_text(cid, "Напиши текст для %s — отправлю ему в TeamTalk "
+            self._tg_answer_cb(qid, "Введите текст сообщения.")
+            self._tg_send_text(cid, "Введите текст для %s — он будет отправлен ему в TeamTalk "
                                       "личным сообщением. Отмена — любая команда со слэшем." % nick)
             return
         if data.startswith("kick:do:"):
@@ -1408,12 +1454,12 @@ class MusicBot(TeamTalk5.TeamTalk):
         # /start или /start sub_<token>
         token = text[len("/start "):].strip() if low.startswith("/start ") else ""
         if not token.startswith("sub_"):
-            self._tg_send_text(cid, "Я музыкант и оповещатель TeamTalk. На сервере отправь боту /sub — получишь ссылку на подписку.")
+            self._tg_send_text(cid, "Я музыкант и оповещатель TeamTalk. На сервере отправьте боту /sub — придёт ссылка на подписку.")
             return
         rec = self.sub_pending.pop(token, None)
         self._save_subs()
         if not rec:
-            self._tg_send_text(cid, "Ссылка недействительна или истекла. Отправь /sub заново на сервере.")
+            self._tg_send_text(cid, "Ссылка недействительна или истекла. Повторите /sub в TeamTalk.")
             return
         rec["subscribed_at"] = time.time()
         if tg_name:
@@ -1422,14 +1468,14 @@ class MusicBot(TeamTalk5.TeamTalk):
             rec["tg_username"] = tg_uname
         self.sub_active[str(cid)] = rec
         self._save_subs()
-        who = rec.get("nick") or rec.get("username") or "твой аккаунт"
-        self._tg_send_text(cid, "✅ Подписка активна (%s): будешь получать уведомления о входе/выходе на сервере «%s». Отписаться — /unsub." % (who, self._server_name()))
+        who = rec.get("nick") or rec.get("username") or "аккаунт"
+        self._tg_send_text(cid, "Подписка активна (%s). Уведомления о входах и выходах на сервере «%s» будут приходить в этот чат. Отписка: /unsub." % (who, self._server_name()))
 
     def _tg_help_text(self, is_admin=False):
         text = (
             "Команды бота (работают и без слэша):\n"
             "play / p <запрос> — поиск и игра; голый play / p — пауза/продолжить\n"
-            "ссылку можно просто вставить боту или дать через u <ссылка> — сыграет\n"
+            "ссылку можно просто вставить боту или передать командой u <ссылка>\n"
             "n — следующий, b — предыдущий (по списку или плейлисту)\n"
             "pause / resume — пауза и продолжить\n"
             "stop — стоп, skip — пропустить трек\n"
@@ -1441,7 +1487,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "sv yt / sv ym — сервис\n"
             "cm — отвечать в канал/личку\n"
             "cn <ник> — ник, cs <текст> — статус, sc — сохранить\n"
-            "status — что сейчас играет\n"
+            "status — текущий трек\n"
             "sub / sub mus — подписки (команды работают в TeamTalk)\n"
             "Музыку заказывает любой, управление ботом — только админам."
         )
@@ -1503,7 +1549,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return None
             fpath = info["file_path"]
             url = "https://api.telegram.org/file/bot%s/%s" % (TG_TOKEN, fpath)
-            with urllib.request.urlopen(url, timeout=180) as r:
+            with _tg_urlopen(url, timeout=180) as r:
                 data = r.read()
             name = os.path.basename(fpath) or ("audio_%s.ogg" % file_id[:8])
             local = os.path.join(INBOX_DIR, name)
@@ -1834,7 +1880,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         """Play a direct link; a YouTube/Yandex playlist queues all its tracks."""
         url = self._normalize_ym_url(url)
         if self._is_yt_playlist_url(url) or self._is_ym_playlist_url(url):
-            self._send("📃 Плейлист: собираю треки…")
+            self._send("Плейлист: сбор треков…")
             threading.Thread(target=self._playlist_worker, args=(url,), daemon=True).start()
             return
         self._switch_to(url, label)
@@ -1844,33 +1890,33 @@ class MusicBot(TeamTalk5.TeamTalk):
         if url.startswith("ytsearch1:"):
             q = url.split(":", 1)[1]
             if not self.silent:
-                self.api_q.put(("status", "🔎 Ищу на YouTube: %s…" % q))
+                self.api_q.put(("status", "Поиск на YouTube: %s…" % q))
             items = self._yt_search_list(q)
             if not items:
-                self.api_q.put(("download_fail", url, title, "Поиск не нашёл видео"))
+                self.api_q.put(("download_fail", url, title, "Видео по запросу не найдено"))
                 return
             real_url = items[0]["key"]
         ym_title = None
         if url.startswith("ymtrack:"):
             tid = url.split(":", 1)[1]
             if not self.silent:
-                self.api_q.put(("status", "🎵 Ищу трек на Яндекс.Музыке…"))
+                self.api_q.put(("status", "Поиск трека на Яндекс.Музыке…"))
             real_url, ym_title = self._ym_resolve(tid)
             if not real_url:
-                self.api_q.put(("download_fail", url, title, ym_title or "не нашёл"))
+                self.api_q.put(("download_fail", url, title, ym_title or "трек не найден"))
                 return
             title = ym_title or title
         elif url.startswith("ymsearch1:"):
             q = url.split(":", 1)[1]
             if not self.silent:
-                self.api_q.put(("status", "🔎 Ищу на Яндекс.Музыке: %s…" % q))
+                self.api_q.put(("status", "Поиск на Яндекс.Музыке: %s…" % q))
             items = self._ym_search_list(q)
             if not items:
-                self.api_q.put(("download_fail", url, title, "Ничего не нашёл на Яндекс.Музыке."))
+                self.api_q.put(("download_fail", url, title, "На Яндекс.Музыке ничего не найдено."))
                 return
             real_url, ym_title = self._ym_resolve(items[0]["key"].split(":", 1)[1])
             if not real_url:
-                self.api_q.put(("download_fail", url, title, ym_title or "не нашёл"))
+                self.api_q.put(("download_fail", url, title, ym_title or "трек не найден"))
                 return
             title = ym_title or title
         canon_done = False
@@ -1942,7 +1988,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                             return
                         err_msg = (err_text.splitlines()[-1] if err_text else "yt-dlp failed")[:300]
                         if attempt < 3:
-                            self.api_q.put(("status", "⚠ %s. Повтор %d/3 через 15с…" % (err_msg, attempt)))
+                            self.api_q.put(("status", "%s. Повтор %d из 3 через 15 с." % (err_msg, attempt)))
                             time.sleep(15)
                             continue
                         self.api_q.put(("download_fail", url, title, err_msg))
@@ -1953,14 +1999,14 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return
             except subprocess.TimeoutExpired:
                 if attempt < 3:
-                    self.api_q.put(("status", "⚠ Таймаут скачивания. Повтор %d/3 через 15с…" % attempt))
+                    self.api_q.put(("status", "Таймаут скачивания. Повтор %d из 3 через 15 с." % attempt))
                     time.sleep(15)
                     continue
                 self.api_q.put(("download_fail", url, title, "timeout"))
                 return
             except Exception as e:
                 if attempt < 3:
-                    self.api_q.put(("status", "⚠ Ошибка: %s. Повтор %d/3 через 15с…" % (str(e)[:120], attempt)))
+                    self.api_q.put(("status", "Ошибка: %s. Повтор %d из 3 через 15 с." % (str(e)[:120], attempt)))
                     time.sleep(15)
                     continue
                 self.api_q.put(("download_fail", url, title, str(e)[:300]))
@@ -2156,7 +2202,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.paused = False
         self.cur_offset_ms = 0
         if not self.silent:
-            self._send("▶ Сейчас играет: %s" % title)
+            self._send("Сейчас играет: %s" % title)
         self._set_status("Playing: %s" % title)
         if self.voice_announce and title:
             # Озвучку синтезируем в фоновом потоке: запрос к Google занимает до
@@ -2210,7 +2256,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.paused = True
         self._stop_voice()
         self._set_status("Paused: %s" % (self.current[1] if self.current else ""))
-        self._send("⏸ Пауза (%s)" % _fmt_ms(self.cur_offset_ms))
+        self._send("Пауза (%s)" % _fmt_ms(self.cur_offset_ms))
 
     def _resume(self):
         if not self.playing or not self.paused or not self.current_orig:
@@ -2218,31 +2264,32 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.paused = False
         self._set_status("Playing: %s" % (self.current[1] if self.current else ""))
         self._start_voice(self.current_orig, self.cur_offset_ms)
-        self._send("▶ Продолжаю (%s)" % _fmt_ms(self.cur_offset_ms))
+        self._send("Воспроизведение продолжено (%s)" % _fmt_ms(self.cur_offset_ms))
 
     def _set_volume(self, v):
         v = max(1, min(MAX_VOLUME, v))
         self.volume = v
         # No ffmpeg restart needed: _scale_pcm applies the new gain to the next
         # audio block, so volume changes take effect instantly for any source.
-        self._send("🔊 Громкость: %d%%" % v)
+        self._send("Громкость: %d%%" % v)
 
     def _seek(self, delta_s):
         """Seek the current track by delta_s seconds (negative = backwards)."""
         if not self.playing or not self.current_orig:
-            self._send("Сейчас ничего не играет.")
+            self._send("Воспроизведение неактивно.")
             return
         cur = self.cur_offset_ms if self.paused else self._elapsed_ms()
         new_ms = max(0, cur + delta_s * 1000)
         self.cur_offset_ms = new_ms
-        arrow = "⏪" if delta_s < 0 else "⏩"
+        direction = "назад" if delta_s < 0 else "вперёд"
+        msg = "Перемотка %s на %d с. Позиция: %s" % (direction, abs(delta_s), _fmt_ms(new_ms))
         if self.paused:
             self._set_status("Paused: %s" % (self.current[1] if self.current else ""))
-            self._send("%s %s → ⏱ %s" % (arrow, ("%dс" % delta_s), _fmt_ms(new_ms)))
+            self._send(msg)
         else:
             self._set_status("Playing: %s" % (self.current[1] if self.current else ""))
             self._start_voice(self.current_orig, new_ms)
-            self._send("%s %s → ⏱ %s" % (arrow, ("%dс" % delta_s), _fmt_ms(new_ms)))
+            self._send(msg)
 
     def _switch_to(self, key, label):
         """Stop whatever plays and immediately play `key` (used by n/b and direct links)."""
@@ -2263,40 +2310,40 @@ class MusicBot(TeamTalk5.TeamTalk):
     def _play_search_index(self, idx, silent=False):
         self.silent = silent
         if not self.search_results:
-            self._send("Список результатов пуст. Сначала поищи: /play <запрос>")
+            self._send("Список результатов пуст. Сначала выполните поиск: /play <запрос>")
             return
         if idx < 0 or idx >= len(self.search_results):
             self._send("Нет результата под номером %d (всего %d)." % (idx + 1, len(self.search_results)))
             return
         self.search_index = idx
         item = self.search_results[idx]
-        self._switch_to(item["key"], "🎵 %d. %s" % (idx + 1, item["title"]))
+        self._switch_to(item["key"], "%d. %s" % (idx + 1, item["title"]))
         self.auto_list = True
 
     def _play_playlist_index(self, idx, silent=False):
         """Play track `idx` of the current playlist (YouTube / Yandex Music)."""
         self.silent = silent
         if not self.playlist:
-            self._send("Список плейлиста пуст. Вставь ссылку на плейлист.")
+            self._send("Список плейлиста пуст. Вставьте ссылку на плейлист.")
             return
         if idx < 0 or idx >= len(self.playlist):
             self._send("Нет трека под номером %d (всего %d)." % (idx + 1, len(self.playlist)))
             return
         self.playlist_index = idx
         u, t = self.playlist[idx]
-        self._switch_to(u, "🎵 %d. %s" % (idx + 1, t))
+        self._switch_to(u, "%d. %s" % (idx + 1, t))
         self.auto_playlist = True
 
     def _playlist_page_lines(self, page=1, per_page=20):
         """Numbered page of the loaded playlist (whole list fits via pages)."""
         if not self.playlist:
-            return ["Список плейлиста пуст. Вставь ссылку на плейлист."]
+            return ["Список плейлиста пуст. Вставьте ссылку на плейлист."]
         total = len(self.playlist)
         pages = max(1, (total + per_page - 1) // per_page)
         page = max(1, min(pages, page))
         start = (page - 1) * per_page
         end = min(total, start + per_page)
-        lines = ["📃 Плейлист: %d треков (стр. %d/%d)" % (total, page, pages)]
+        lines = ["Плейлист: %d треков (стр. %d из %d)" % (total, page, pages)]
         for i in range(start, end):
             _u, t = self.playlist[i]
             lines.append("%d. %s" % (i + 1, t[:45]))
@@ -2304,7 +2351,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         return lines
 
     def _do_search(self, query):
-        self._send("🔎 Ищу: %s…" % query)
+        self._send("Поиск: %s…" % query)
         threading.Thread(target=self._search_worker, args=(query,), daemon=True).start()
 
     def _search_worker(self, query):
@@ -2346,7 +2393,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             ended = self.auto_list or self.auto_playlist
             self.auto_list = False
             self.auto_playlist = False
-            self._send("⏹ Конец списка." if ended else "⏹ Очередь пуста.")
+            self._send("Конец списка." if ended else "Очередь пуста.")
 
     # ----- favorites (избранное) -----
     def _load_favorites(self):
@@ -2387,12 +2434,12 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return
             self.favorites.append({"key": key, "label": label, "radio": is_radio})
             self._save_favorites()
-            self._send("⭐ Добавлено в избранное: %s" % label)
+            self._send("Добавлено в избранное: %s" % label)
             return
         if arg.startswith("+ "):
             u = URL_RE.search(arg[2:])
             if not u:
-                self._send("Дай ссылку: f + https://…")
+                self._send("Формат: f + https://…")
                 return
             key = self._normalize_ym_url(u.group(0))
             if any(it["key"] == key for it in self.favorites):
@@ -2400,7 +2447,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return
             self.favorites.append({"key": key, "label": key, "radio": False})
             self._save_favorites()
-            self._send("⭐ Добавлено в избранное: %s" % key)
+            self._send("Добавлено в избранное: %s" % key)
             return
         if arg == "-" or arg.startswith("- "):
             num = arg[1:].strip()
@@ -2413,7 +2460,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return
             it = self.favorites.pop(idx)
             self._save_favorites()
-            self._send("🗑 Удалено из избранного: %s" % it["label"])
+            self._send("Удалено из избранного: %s" % it["label"])
             return
         if arg.isdigit():
             idx = int(arg) - 1
@@ -2471,7 +2518,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._send("Нет папки radio/ с m3u. Положи станции и перезапусти.")
             return
         if not arg:
-            lines = ["📻 Радио (%d станций):" % len(self.radio)]
+            lines = ["Радио (%d станций):" % len(self.radio)]
             for i, (t, _u) in enumerate(self.radio, 1):
                 lines.append("%d. %s" % (i, t))
                 if i >= 15:
@@ -2492,7 +2539,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         q = arg.lower()
         found = [(i + 1, t) for i, (t, _u) in enumerate(self.radio) if q in t.lower()]
         if not found:
-            self._send("Не нашёл станцию «%s»." % arg)
+            self._send("Станция «%s» не найдена." % arg)
             return
         lines = ["Нашёл:"]
         for idx, t in found[:10]:
@@ -2512,7 +2559,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.current_orig = None
         self.cur_source = (url, title, True)
         self.cur_offset_ms = 0
-        self._send("📻 ▶ %s" % title)
+        self._send("Играет радио: %s" % title)
         self._set_status("Radio: %s" % title)
         self._start_voice(url, 0)
 
@@ -2590,7 +2637,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         # --- гейт: служебные команды — только администраторам ---
         # (в TeamTalk админ = USERTYPE_ADMIN; из Telegram сюда попадают уже после _tg_allowed)
         first = cmd.split(None, 1)[0]
-        admin_only = first in ("rs", "restart", "cn", "cs", "sv", "svc", "cm", "channel", "sc", "save", "login")
+        admin_only = first in ("rs", "restart", "cn", "cs", "sv", "svc", "cm", "channel", "sc", "save", "login", "cookies")
         if not admin_only:
             admin_only = cmd.startswith("lf ")
         if admin_only and not self._is_admin(from_user):
@@ -2627,14 +2674,14 @@ class MusicBot(TeamTalk5.TeamTalk):
         if cmd == "cm":
             self.channel_msg = not self.channel_msg
             self._save_channel_msg()
-            self._send("Сообщения в канал: %s" % ("вкл ✅" if self.channel_msg else "выкл ⭕"))
+            self._send("Сообщения в канал: %s." % ("включены" if self.channel_msg else "выключены"))
             return
 
         # --- озвучка названия трека: vo — вкл/выкл ---
         if cmd == "vo":
             self.voice_announce = not self.voice_announce
             self._save_voice_announce()
-            self._send("Озвучка названий: %s" % ("вкл 🔊" if self.voice_announce else "выкл ⭕"))
+            self._send("Озвучка названий треков: %s." % ("включена" if self.voice_announce else "выключена"))
             return
 
         # --- вход в YouTube своим аккаунтом: login (статус + как войти) ---
@@ -2642,9 +2689,19 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._cmd_login()
             return
 
+        # --- приём кук YouTube: cookies — включить режим ожидания файла кук ---
+        if cmd == "cookies":
+            self._await_cookies = time.time() + 900  # 15 минут на присылку файла
+            self._send(
+                "Режим приёма кук включён на 15 минут.\n"
+                "Пришлите в Telegram файл с экспортом кук (формат Netscape, "
+                "расширение Get cookies.txt). Бот проверит его, сохранит и перезапустится."
+            )
+            return
+
         # --- перезапуск бота: rs ---
         if cmd in ("rs", "restart"):
-            self._send("🔄 Перезапускаюсь…")
+            self._send("Выполняется перезапуск.")
             threading.Thread(target=_restart_bot_soon, daemon=True).start()
             return
 
@@ -2654,17 +2711,17 @@ class MusicBot(TeamTalk5.TeamTalk):
             parts = text.split(None, 1)
             if len(parts) < 2:
                 cur = {"yt": "YouTube", "ym": "Яндекс.Музыка"}.get(self.service, "?")
-                self._send("Сейчас: %s. Сменить: sv yt или sv ym." % cur)
+                self._send("Текущий сервис: %s. Смена: sv yt или sv ym." % cur)
                 return
             svc = parts[1].strip().lower()
             if svc in ("yt", "youtube"):
                 self.service = "yt"
-                self._send("🎬 Сервис: YouTube.")
+                self._send("Сервис: YouTube.")
             elif svc in ("ym", "ya", "yandex"):
                 self.service = "ym"
-                self._send("🎵 Сервис: Яндекс.Музыка.")
+                self._send("Сервис: Яндекс.Музыка.")
             else:
-                self._send("Не знаю сервис «%s». Доступно: yt (YouTube), ym (Яндекс.Музыка)." % svc)
+                self._send("Сервис «%s» не распознан. Доступно: yt (YouTube), ym (Яндекс.Музыка)." % svc)
             return
 
         # --- сохранить настройки сессии в config.json: sc ---
@@ -2676,18 +2733,18 @@ class MusicBot(TeamTalk5.TeamTalk):
                     "runtime": {"main_service": self.service},
                     "playback": {"default_volume": int(self.volume)},
                 })
-                self._send("💾 Сохранено в config.json: ник «%s», сервис %s, громкость %d."
+                self._send("Настройки сохранены: ник «%s», сервис %s, громкость %d."
                            % (self.nickname, svc, self.volume))
             except Exception as e:
                 log("sc save err: %s" % e)
-                self._send("Не удалось сохранить в config.json: %s" % e)
+                self._send("Не удалось сохранить настройки: %s" % e)
             return
 
         # --- смена ника: cn <ник> (в текущей сессии; навсегда — /sc) ---
         if cmd == "cn" or cmd.startswith("cn "):
             parts = text.split(None, 1)
             if len(parts) < 2 or not parts[1].strip():
-                self._send("Использование: cn <ник>, напр. cn музыкант")
+                self._send("Использование: cn <ник>, например: cn музыкант")
                 return
             nick = parts[1].strip()
             if len(nick) > 255:
@@ -2695,7 +2752,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return
             self.nickname = nick
             self.doChangeNickname(nick)
-            self._send("✅ Ник: %s. Чтобы сохранить навсегда — /sc" % nick)
+            self._send("Ник изменён: %s. Постоянное сохранение — /sc." % nick)
             return
 
         # --- смена статусного сообщения: cs <текст> (пусто = очистить) ---
@@ -2709,7 +2766,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             except Exception as e:
                 log("status msg save err: %s" % e)
             self._set_status(status)
-            self._send("✅ Статус: %s" % (status or "(пусто — очищен)"))
+            self._send("Статус установлен: %s" % (status or "(пусто — очищен)"))
             return
 
         # --- стоп / скип / очередь / статус / помощь ---
@@ -2727,7 +2784,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             self.cur_offset_ms = 0
             self._announce_pending = None
             self._set_status(self.status_msg)
-            self._send("⏹ Стоп.")
+            self._send("Воспроизведение остановлено.")
             return
 
         if cmd in ("skip",):
@@ -2745,14 +2802,14 @@ class MusicBot(TeamTalk5.TeamTalk):
         # --- загрузить играющий трек файлом в канал (сервер TeamTalk): dl / скачать / download ---
         if cmd in ("dl", "download"):
             if not self.playing or not self.current_file:
-                self._send("Сейчас ничего не играет — скачивать нечего.")
+                self._send("Воспроизведение неактивно — выгружать нечего.")
                 return
             if self._dl_cmd_id is not None:
-                self._send("Файл уже загружается — подожди.")
+                self._send("Файл уже загружается. Ожидайте завершения.")
                 return
             path = self.current_file
             if not os.path.isfile(path):
-                self._send("Файл трека недоступен (это, вероятно, радио).")
+                self._send("Файл трека недоступен (вероятно, это радио).")
                 return
             title = (self.current or ("", "трек"))[1] or "трек"
             ext = os.path.splitext(path)[1] or ".mp3"
@@ -2764,12 +2821,12 @@ class MusicBot(TeamTalk5.TeamTalk):
                 shutil.copy2(path, tmp)
             except Exception as e:
                 log("dl copy err: %s" % str(e)[:150])
-                self._send("Ошибка: не могу подготовить файл (%s)" % str(e)[:100])
+                self._send("Не удалось подготовить файл: %s" % str(e)[:100])
                 return
             # Треки теперь хранятся как есть (opus/webm/m4a) без перекодирования;
             # в канал удобнее mp3 — конвертируем копию один раз, только по /dl.
             if ext.lower() != ".mp3":
-                self._send("Готовлю mp3…")
+                self._send("Подготовка mp3…")
                 mp3tmp = os.path.join(CACHE_DIR, "upload_%d_%s.mp3" % (int(time.time() * 1000), safe))
                 try:
                     # nice, чтобы транскод не отъедал CPU у играющего трека
@@ -2798,12 +2855,12 @@ class MusicBot(TeamTalk5.TeamTalk):
                     os.remove(tmp)
                 except Exception:
                     pass
-                self._send("⚠ Не удалось начать загрузку в канал.")
+                self._send("Не удалось начать загрузку файла в канал.")
                 return
             self._dl_cmd_id = cmd_id
             self._dl_remote = os.path.basename(tmp)
             self._dl_local = tmp
-            self._send("📤 Загружаю «%s» в канал…" % self._dl_remote)
+            self._send("Загрузка файла «%s» в канал…" % self._dl_remote)
             return
 
         if cmd in ("help", "h"):
@@ -2871,7 +2928,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             arg = parts[1].strip() if len(parts) > 1 else ""
             if arg:
                 if URL_RE.search(arg):
-                    self._send("Это ссылка — используй /u <ссылка> или просто вставь её.")
+                    self._send("Это ссылка. Для ссылок: /u <ссылка> или вставка ссылки напрямую.")
                 else:
                     self._do_search(arg)
                 return
@@ -2880,7 +2937,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             elif self.playing:
                 self._pause()
             else:
-                self._send("Что играем? /play <запрос> или просто вставь ссылку.")
+                self._send("Запрос не указан. Формат: /play <запрос> или вставка ссылки.")
             return
 
         # --- pause / resume: явные команды ---
@@ -2904,7 +2961,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return
             self.doJoinChannelByID(cid, CHANNEL_PASSWORD)
             self.play_channel_id = cid
-            self._send("Перехожу в канал: %s" % path)
+            self._send("Переход в канал: %s" % path)
             return
 
         # --- прямая ссылка: u <url> / link <url> / url <url> ---
@@ -2913,11 +2970,11 @@ class MusicBot(TeamTalk5.TeamTalk):
         if first in ("u", "link", "url"):
             parts = text.split(None, 1)
             if len(parts) < 2:
-                self._send("Использование: /u <ссылка>. Или просто вставь ссылку — сыграю сам.")
+                self._send("Ссылка не указана. Формат: /u <ссылка> (либо вставка ссылки напрямую).")
                 return
             u = URL_RE.search(parts[1])
             if not u:
-                self._send("Это не ссылка: «%s». Дай ссылку: /u https://…" % parts[1][:80])
+                self._send("Это не ссылка: «%s». Формат: /u https://…" % parts[1][:80])
                 return
             self._handle_url(u.group(0), u.group(0))
             return
@@ -2935,7 +2992,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             return
         self.queue.append((url, label))
         if not self.silent:
-            self._send("➕ %s" % label)
+            self._send("Добавлено в очередь: %s" % label)
         self._enqueue_next()
 
     def _queue_cmd(self):
@@ -2949,38 +3006,39 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _status_cmd(self):
         if self.playing and self.current:
-            lines = ["▶ Играет: %s" % self.current[1]]
-            lines.append("⏱ %s" % _fmt_ms(self._elapsed_ms()))
+            lines = ["Сейчас играет: %s" % self.current[1]]
+            lines.append("Время: %s" % _fmt_ms(self._elapsed_ms()))
             if self.paused:
-                lines.append("⏸ Пауза")
+                lines.append("Пауза")
             if self.volume < 100:
-                lines.append("🔊 %d%%" % self.volume)
+                lines.append("Громкость: %d%%" % self.volume)
         else:
-            lines = ["Ничего не играет."]
-        lines.append("Отправь help — справка по командам.")
+            lines = ["Воспроизведение неактивно."]
+        lines.append("Справка: /help.")
         self._send("\n".join(lines))
 
     def _help_cmd(self):
         self._send(
-            "Команды — со слэшем, в TeamTalk шли их боту в личку.\n"
-            "Ссылку можно просто вставить боту в личку или в канал — сыграет.\n"
-            "/play или /p <запрос> — поиск и игра (голый /p или /play — пауза/продолжить)\n"
-            "/pause, /resume — пауза и продолжить\n"
-            "/stop — стоп и очистить очередь, /skip — пропустить трек\n"
-            "/n — следующий, /b — предыдущий (по списку или плейлисту)\n"
+            "Справка по командам. Команды отправляются боту в личку TeamTalk, со слэшем.\n"
+            "Ссылку можно вставить боту в личку или в канал — будет воспроизведена.\n"
+            "/play, /p <запрос> — поиск и воспроизведение; без запроса — пауза/продолжение\n"
+            "/pause, /resume — пауза, продолжение\n"
+            "/stop — остановить и очистить очередь; /skip — пропустить трек\n"
+            "/n — следующий трек; /b — предыдущий\n"
             "/playlist — список плейлиста постранично\n"
-            "/u <url> — сыграть ссылку напрямую\n"
-            "/radio — станции (/radio <номер> — запуск)\n"
+            "/u <ссылка> — воспроизвести ссылку напрямую\n"
+            "/radio — станции; /radio <номер> — запуск станции\n"
             "/fav — избранное (f + — добавить текущий, f + <ссылка>, f <номер>, f - <номер>)\n"
-            "/v <1-100> — громкость, /sf <сек> — перемотка (/sf -5 или /sb <сек> — назад)\n"
-            "/cm — ответы в канал вкл/выкл, /vo — озвучка названий треков\n"
-            "/sv yt / sv ym — сервис (YouTube / Яндекс.Музыка)\n"
-            "/cn <ник> — ник, /cs <текст> — статус, /sc — сохранить настройки\n"
-            "/lf <путь> — сыграть файл с диска, /dl — отдать трек файлом в канал\n"
-            "/sub mus — присылать играющие треки в Telegram, /sub — входы/выходы\n"
-            "/channel <путь> — сменить канал\n"
-            "/status — что сейчас играет, /help — эта справка\n"
-            "/rs — перезапустить бота"
+            "/v <1-100> — громкость; /sf <сек> — перемотка вперёд; /sb <сек> — назад\n"
+            "/cm — ответы в канал: вкл/выкл; /vo — озвучка названий треков: вкл/выкл\n"
+            "/sv yt, /sv ym — сервис: YouTube или Яндекс.Музыка\n"
+            "/cn <ник> — сменить ник; /cs <текст> — статус; /sc — сохранить настройки\n"
+            "/lf <путь> — воспроизвести файл с диска; /dl — выгрузить трек файлом в канал\n"
+            "/login — статус входа YouTube; /cookies — обновить куки (файл присылается в Telegram)\n"
+            "/sub mus — уведомления о треках в Telegram; /sub — уведомления о входах и выходах\n"
+            "/channel <путь> — перейти в канал\n"
+            "/status — текущее воспроизведение; /help — справка\n"
+            "/rs — перезапуск бота"
         )
 
     # ----- events ----------------------------------------------------
@@ -3258,7 +3316,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         cid = (msg.get("chat") or {}).get("id")
         uid = (msg.get("from") or {}).get("id")
         if uid != TG_OWNER_USER_ID:
-            self._tg_send_text(cid, "Назначать админов может только владелец.")
+            self._tg_send_text(cid, "Назначать администраторов может только владелец.")
             return
         parts = text.split()
         if len(parts) < 2 or not parts[1].lstrip("+-").isdigit():
@@ -3266,25 +3324,25 @@ class MusicBot(TeamTalk5.TeamTalk):
             return
         aid = int(parts[1])
         if aid in self.admins:
-            self._tg_send_text(cid, "%s уже админ." % aid)
+            self._tg_send_text(cid, "Пользователь %s уже является администратором." % aid)
             return
         self.admins.append(aid)
         self._save_admins()
         self._tg_register_commands()
         self._tg_notify_promoted(aid)
-        self._tg_send_text(cid, "✅ Админ назначен: %s (users.db обновлён)." % aid)
+        self._tg_send_text(cid, "Админ назначен: %s (users.db обновлён)." % aid)
 
     def _tg_notify_promoted(self, aid):
         """Уведомить в Telegram человека, которого только что назначили админом."""
-        self._tg_send_text(aid, "Тебя назначили админом бота. Теперь доступны "
-                                "админские команды: /admins, /subs, /admin, /unadmin, /delsub.")
+        self._tg_send_text(aid, "Вы назначены администратором бота. Доступны админские "
+                                "команды: /admins, /subs, /admin, /unadmin, /delsub.")
 
     def _tg_unadmin_cmd(self, msg, text):
         """/unadmin <user_id> — снять админа (только владелец)."""
         cid = (msg.get("chat") or {}).get("id")
         uid = (msg.get("from") or {}).get("id")
         if uid != TG_OWNER_USER_ID:
-            self._tg_send_text(cid, "Снимать админов может только владелец.")
+            self._tg_send_text(cid, "Снимать администраторов может только владелец.")
             return
         parts = text.split()
         if len(parts) < 2 or not parts[1].lstrip("+-").isdigit():
@@ -3292,7 +3350,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             return
         aid = int(parts[1])
         if aid == TG_OWNER_USER_ID:
-            self._tg_send_text(cid, "Владельца снять нельзя.")
+            self._tg_send_text(cid, "Снять администратора с владельца нельзя.")
             return
         if aid in self.admins:
             self.admins.remove(aid)
@@ -3300,7 +3358,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._tg_register_commands()
             self._tg_send_text(cid, "Админ снят: %s (users.db обновлён)." % aid)
         else:
-            self._tg_send_text(cid, "%s не админ." % aid)
+            self._tg_send_text(cid, "Пользователь %s не является администратором." % aid)
 
     def _tg_delsub_cmd(self, msg, text):
         """/delsub <user_id> — убрать подписку подписчика (только админы)."""
@@ -3334,7 +3392,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         if not (TG_TOKEN and self.logged_in):
             return
         if not self.reply_user_id:
-            self._send("Отправь /sub личным сообщением боту.")
+            self._send("Команда /sub принимается только в личном сообщении боту.")
             return
         username = self._tg_bot_username()
         if not username:
@@ -3364,7 +3422,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._send("Музыкальный бот не настроен.")
             return
         if not self.reply_user_id:
-            self._send("Отправь sub mus личным сообщением боту.")
+            self._send("Команда sub mus принимается только в личном сообщении боту.")
             return
         username = self._music_bot_username()
         if not username:
@@ -3492,7 +3550,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         в любом канале). В фоне — не блокирует событийный цикл."""
         try:
             geo = self._ip_geo(ip)
-            text = "👋 Привет, %s! Добро пожаловать на сервер %s." % (nick, self._server_name())
+            text = "Привет, %s. Добро пожаловать на сервер %s." % (nick, self._server_name())
             if ip:
                 text += "\nIP: %s%s" % (ip, (" (%s)" % geo) if geo else "")
             text += "\n%s" % (WELCOME_RULES or "Ознакомься, пожалуйста, с правилами сервера.")
@@ -4012,9 +4070,9 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._dl_cmd_id = None
         self._dl_remote = None
         if ok:
-            self._send("✅ Файл «%s» загружен в канал — можно скачать в TeamTalk." % name)
+            self._send("Файл «%s» загружен в канал — доступен для скачивания в TeamTalk." % name)
         else:
-            self._send("⚠ Не удалось загрузить файл в канал: %s" % (detail or "неизвестная ошибка"))
+            self._send("Не удалось загрузить файл в канал: %s" % (detail or "неизвестная ошибка"))
 
     def onCmdSuccess(self, cmdId):
         if self._dl_cmd_id is not None and cmdId == self._dl_cmd_id:
@@ -4062,7 +4120,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         now = time.time()
         if now - self._last_err_sent > 5:
             self._last_err_sent = now
-            self._send("⚠ Ошибка: %s" % msg)
+            self._send("Ошибка: %s" % msg)
 
     def onCmdUserTextMessage(self, textmessage):
         if not textmessage:
@@ -4135,7 +4193,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                         if not self.playing:
                             self._play_file(url, title, path)
                         elif not self.silent:
-                            self._send("⬇ Скачано (в очереди): %s" % title)
+                            self._send("Скачано (в очереди): %s" % title)
                     # else: stale download (superseded by n/b switch) — drop
                 elif kind == "download_fail":
                     _, url, title, err = item
@@ -4145,17 +4203,17 @@ class MusicBot(TeamTalk5.TeamTalk):
                     if self.queue and self.queue[0][0] == url:
                         self.queue.pop(0)
                         if self.auto_playlist and self.playlist:
-                            self._send("⚠ Не удалось: %s" % err)
+                            self._send("Не удалось: %s" % err)
                             self._advance(silent=True)
                         else:
-                            self._send("⚠ Не удалось скачать %s: %s" % (url, err))
+                            self._send("Не удалось скачать %s: %s" % (url, err))
                             self._enqueue_next()
                     else:
-                        self._send("⚠ Ошибка скачивания: %s" % err)
+                        self._send("Ошибка скачивания: %s" % err)
                 elif kind == "search_done":
                     _, query, items = item
                     if not items:
-                        self._send("Ничего не нашёл по запросу «%s»." % query)
+                        self._send("По запросу «%s» ничего не найдено." % query)
                         return
                     self.search_results = items
                     self.search_index = 0
@@ -4167,7 +4225,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 elif kind == "playlist_done":
                     _, url, items = item
                     if not items:
-                        self._send("⚠ Не удалось получить плейлист: %s" % url)
+                        self._send("Не удалось получить плейлист: %s" % url)
                         return
                     self.auto_list = False
                     self.queue = []
@@ -4221,7 +4279,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                         self._music_broadcast(path, title)
                 elif kind == "voice_error":
                     _, msg = item
-                    self._send("⚠ Голос: %s" % msg)
+                    self._send("Ошибка озвучки: %s" % msg)
                     self._advance()
                 elif kind == "status":
                     _, msg = item
