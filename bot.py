@@ -947,14 +947,17 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self.reply_user_id = prev
                 self._tg_reply_chat = None
             return
-        media = msg.get("voice") or msg.get("audio") or msg.get("video") or msg.get("document")
+        doc = msg.get("document")
+        media = msg.get("voice") or msg.get("audio") or msg.get("video") or doc
         if not media:
             return
         file_id = media.get("file_id")
         if not file_id:
             return
-        # документ-файл с экспортом кук (например, .txt из Get cookies.txt) — принять как вход
-        if "document" in media:
+        # документ-файл с экспортом кук (например, .txt из Get cookies.txt) — принять как вход.
+        # doc выделен отдельно: media уже содержит словарь document, поэтому проверка
+        # типа идёт по msg["document"], а не по ключу внутри media (там его нет).
+        if doc is not None:
             path = self._tg_download(file_id)
             if path:
                 # режим приёма кук (владелец отправил /cookies): любой документ трактуем как
