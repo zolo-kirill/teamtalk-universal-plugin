@@ -3732,6 +3732,54 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception as e:
             log("protection check err: %s" % str(e)[:150])
 
+    def _autokick_check_login(self, user):
+        """Автокик по конфигу (секция autokick): учётные записи, ники и IP,
+        которые при входе выкидываются сразу — кик без бана. Список задаёт
+        владелец. Матч: логин — точный; ник — подстрока; IP — по префиксу."""
+        try:
+            if not user or not self.logged_in:
+                return
+            try:
+                uid = int(getattr(user, "nUserID", 0) or 0)
+            except Exception:
+                uid = 0
+            if uid <= 0 or uid == self.my_user_id:
+                return
+            if self._prot_is_admin(user, uid):
+                return  # админов и сам бот не трогаем
+            rules = _cfg("autokick", None, None) or {}
+            logins = {str(x).strip().lower() for x in (rules.get("logins") or []) if str(x).strip()}
+            nicks = [str(x).strip().lower() for x in (rules.get("nicks") or []) if str(x).strip()]
+            ips = [str(x).strip() for x in (rules.get("ip_prefixes") or []) if str(x).strip()]
+            if not (logins or nicks or ips):
+                return
+            username = (self._tt_field(user, "szUsername") or "").strip()
+            nick = (self._tt_field(user, "szNickname") or "").strip()
+            ip = (self._tt_field(user, "szIPAddress") or "").strip()
+            why = ""
+            if username and username.lower() in logins:
+                why = "логин «%s»" % username
+            elif nick and any(n in nick.lower() for n in nicks):
+                why = "ник «%s»" % nick
+            elif ip and any(ip.startswith(p) for p in ips):
+                why = "IP %s" % ip
+            if not why:
+                return
+            self._prot_bad[uid] = why  # глушим анонс входа и приветствие
+            try:
+                self.doKickUser(uid, 0)
+            except Exception as e:
+                log("autokick err: %s" % str(e)[:120])
+                return
+            who = nick or username or "?"
+            log("autokick: uid=%d %s кикнут (%s)" % (uid, who, why))
+            if TG_NOTIFY_CHAT_ID:
+                text = "Автокик: %s (%s%s) — выгнан при входе." % (
+                    who, why, (", %s" % ip) if ip else "")
+                self._tg_send_notify(text, TG_NOTIFY_CHAT_ID)
+        except Exception as e:
+            log("autokick check err: %s" % str(e)[:150])
+
     def _prot_ban_loop(self):
         """Серийный банильщик: один поток, очередь — чтобы флуд не плодил тысячи
         потоков и не долбил диск одновременными save_bans."""
@@ -3983,8 +4031,9 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception:
             pass
         self._prot_check_login(user)
+        self._autokick_check_login(user)
         if user and getattr(user, "nUserID", 0) in self._prot_bad:
-            return  # забанили — не анонсируем и не шлём приветствие ботнету
+            return  # забанили/автокик — не анонсируем и не шлём приветствие
         self._notify_join_leave("+", user)
         self._welcome_join(user)
 
