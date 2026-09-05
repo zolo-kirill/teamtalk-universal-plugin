@@ -25,3 +25,9 @@ inbox/
 bgutil/
 .channel_msg
 config.json
+
+# Домашний туннель (hometun): приватные ключи и локальные настройки клиента
+hometun/client/config.txt
+*.ppk
+tun_key
+tun_key.pub
