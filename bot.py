@@ -9,6 +9,7 @@ import queue
 import re
 import secrets
 import select
+import socket
 import shutil
 import subprocess
 import sys
@@ -45,12 +46,39 @@ def _b(s):
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-# ---- прокси для запросов к Telegram API ----
+# ---- прокси для запросов к Telegram API и YouTube ----
 # Дата-центр сервера DPI-блокирует исходящие TCP к подсетям Telegram, поэтому
-# запросы к api.telegram.org идут через локальный мост (TG_PROXY), всё остальное
-# (yandex-music, rutube и пр.) — напрямую, без прокси.
+# запросы к api.telegram.org идут через локальный мост (TG_PROXY). Тот же дата-центр
+# режет и домены YouTube (www.youtube.com, googlevideo.com), поэтому yt-dlp для
+# YouTube тоже ходит через мост (YT_PROXY). yandex-music, rutube и пр. — напрямую.
 TG_PROXY = os.environ.get("TG_PROXY", "").strip()
+YT_PROXY = os.environ.get("YT_PROXY", "").strip()
+# Домашний туннель (см. hometun/README.md): когда он поднят, YouTube качается
+# через него (домашний интернет), иначе — обычным каналом. Формат как у yt-dlp,
+# например socks5://127.0.0.1:1080
+YT_TUNNEL = os.environ.get("YT_TUNNEL", "").strip()
 _TG_OPENER = None
+
+
+def _yt_proxy():
+    """Прокси для очередного скачивания YouTube.
+
+    Если настроен домашний туннель (YT_TUNNEL) и он сейчас поднят — YouTube идёт
+    через него. Если туннель закрыт или не настроен — обычный YT_PROXY, а когда
+    и он пуст — напрямую. Режим без YT_TUNNEL не меняет прежнего поведения:
+    YT_PROXY, иначе мост TG_PROXY.
+    """
+    if YT_TUNNEL:
+        m = re.match(r"^socks5h?://([^:/]+):(\d+)", YT_TUNNEL)
+        if m:
+            host, port = m.group(1), int(m.group(2))
+            try:
+                with socket.create_connection((host, port), timeout=0.5):
+                    return YT_TUNNEL
+            except OSError:
+                pass
+        return YT_PROXY  # '' → напрямую
+    return YT_PROXY or TG_PROXY
 
 
 def _tg_urlopen(req, timeout):
@@ -1650,6 +1678,9 @@ class MusicBot(TeamTalk5.TeamTalk):
                 ]
                 if YT_JS_RUNTIME:
                     cmd += ["--js-runtimes", "deno:%s" % YT_JS_RUNTIME]
+                _proxy = _yt_proxy()
+                if _proxy:
+                    cmd += ["--proxy", _proxy]
                 ck = None
                 if use_ck:
                     ck = _fresh_cookies(COOKIES)
@@ -1727,6 +1758,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             "--no-warnings",
             "--print", "%(title)s\t%(url)s",
         ]
+        _proxy = _yt_proxy()
+        if _proxy:
+            cmd += ["--proxy", _proxy]
         if YT_PO_TOKEN:
             cmd += ["--extractor-args", YT_PO_TOKEN]
         ck = _fresh_cookies()
@@ -1793,6 +1827,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             "--no-warnings",
             "--print", "%(title)s\t%(url)s",
         ]
+        _proxy = _yt_proxy()
+        if _proxy:
+            cmd += ["--proxy", _proxy]
         if YT_PO_TOKEN:
             cmd += ["--extractor-args", YT_PO_TOKEN]
         ck = _fresh_cookies()
@@ -1955,6 +1992,9 @@ class MusicBot(TeamTalk5.TeamTalk):
                     cmd += ["--js-runtimes", "deno:%s" % YT_JS_RUNTIME]
                 if YT_PO_TOKEN:
                     cmd += ["--extractor-args", YT_PO_TOKEN]
+                _proxy = _yt_proxy()
+                if _proxy and "rutube.ru" not in real_url:
+                    cmd += ["--proxy", _proxy]
                 ck = _fresh_cookies(RUTUBE_COOKIES if "rutube.ru" in real_url else COOKIES)
                 if ck:
                     cmd += ["--cookies", ck]
