@@ -86,10 +86,5 @@
             "nicknames": [],
             "ip_prefixes": ["127.0.0.", "10.", "192.168."]
         }
-    },
-    "autokick": {
-        "logins": [],
-        "nicks": [],
-        "ip_prefixes": []
     }
 }
