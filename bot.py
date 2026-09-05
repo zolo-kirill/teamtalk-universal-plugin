@@ -1427,8 +1427,8 @@ class MusicBot(TeamTalk5.TeamTalk):
     def _tg_help_text(self, is_admin=False):
         text = (
             "Команды бота (работают и без слэша):\n"
-            "play <запрос или ссылка> — найти и играть; голый play — пауза/продолжить\n"
-            "ссылку можно просто вставить боту — тоже сыграет\n"
+            "play / p <запрос> — поиск и игра; голый play / p — пауза/продолжить\n"
+            "ссылку можно просто вставить боту или дать через u <ссылка> — сыграет\n"
             "n — следующий, b — предыдущий (по списку или плейлисту)\n"
             "pause / resume — пауза и продолжить\n"
             "stop — стоп, skip — пропустить трек\n"
@@ -2842,14 +2842,14 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._fav_cmd(arg)
             return
 
-        # --- play: с запросом/ссылкой — поиск и игра; голый — play/pause toggle ---
+        # --- play/p: с текстом — поиск и игра; голый — пауза/продолжить.
+        # Ссылки сюда не принимаем — для них /u или просто вставь ссылку.
         if cmd == "play" or cmd.startswith("play ") or cmd == "p" or cmd.startswith("p "):
             parts = text.split(None, 1)
             arg = parts[1].strip() if len(parts) > 1 else ""
             if arg:
-                u = URL_RE.search(arg)
-                if u:
-                    self._handle_url(u.group(0), u.group(0))
+                if URL_RE.search(arg):
+                    self._send("Это ссылка — используй /u <ссылка> или просто вставь её.")
                 else:
                     self._do_search(arg)
                 return
@@ -2858,7 +2858,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             elif self.playing:
                 self._pause()
             else:
-                self._send("Что играем? /play <запрос> или /play <ссылка>.")
+                self._send("Что играем? /play <запрос> или просто вставь ссылку.")
             return
 
         # --- pause / resume: явные команды ---
@@ -2942,7 +2942,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._send(
             "Команды — со слэшем, в TeamTalk шли их боту в личку.\n"
             "Ссылку можно просто вставить боту в личку или в канал — сыграет.\n"
-            "/play <запрос или ссылка> — найти и играть (голый /play — пауза/продолжить)\n"
+            "/play или /p <запрос> — поиск и игра (голый /p или /play — пауза/продолжить)\n"
             "/pause, /resume — пауза и продолжить\n"
             "/stop — стоп и очистить очередь, /skip — пропустить трек\n"
             "/n — следующий, /b — предыдущий (по списку или плейлисту)\n"
@@ -4060,13 +4060,14 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return
             # команды — только со слэшем (/sub, /play, ...). Исключение:
             # сообщение-ссылка (ровно один URL и больше ничего) — в личку боту
-            # или в канал вставленную ссылку играем, как /play <ссылка>.
+            # или в канал вставленную ссылку играем напрямую (минуя play-ветку:
+            # /play ссылки не принимает, для них /u или вставка).
             # Прочие не-команды: в личку — пересылаем админам (можно ответить),
             # в канал — игнорируем (пересылка только засоряла чат)
             if not self._is_tt_command(msg):
                 bare = self._bare_link(msg)
                 if bare:
-                    self._handle_cmd("/play " + bare, textmessage.nFromUserID)
+                    self._handle_url(bare, bare)
                     return
                 if int(getattr(textmessage, "nMsgType", 0) or 0) == TextMsgType.MSGTYPE_USER:
                     self._tt_forward_private(textmessage.nFromUserID, msg)
