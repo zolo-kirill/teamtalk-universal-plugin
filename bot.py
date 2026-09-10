@@ -272,6 +272,12 @@ ACC_WATCH_NOTIFY   = bool(_cfg("account_watch.notify_owner", None, True))
 # (welcome.rules_text в config.json; пусто — стандартная строка).
 WELCOME_RULES = str(_cfg("welcome.rules_text", None, "") or "").strip()
 
+# Кэш гео-резолва (ip -> (время, «город, страна · провайдер»)): один и тот же
+# адрес не дёргаем повторно, у бесплатного ip-api.com лимит запросов в минуту.
+GEO_CACHE = {}
+GEO_CACHE_TTL = 6 * 3600
+GEO_CACHE_MAX = 500
+
 # Отдельный Telegram-бот для музыки: подписчики (sub mus) получают играющие треки.
 # Пусто — музыкальный бот не подключён (sub mus отвечает, что не настроен).
 TG_MUSIC_TOKEN = str(_cfg("telegram.music_token", "TG_MUSIC_TOKEN", "")).strip()
@@ -3555,22 +3561,47 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("notify join/leave err: %s" % str(e)[:150])
 
     def _ip_geo(self, ip):
-        """Страна и город по IP через ip-api.com (бесплатный эндпоинт, без ключа)."""
+        """«Город, страна · провайдер» по IP через ip-api.com (бесплатный эндпоинт,
+        без ключа, имена на русском). Ответ кэшируется; при любой ошибке — пусто,
+        вызывающий код просто не показывает строку. Сам IP нигде не раскрываем."""
         try:
+            if not ip:
+                return ""
+            ip = str(ip).strip()
             if not ip or ip in ("0.0.0.0", "::", "::1", "127.0.0.1", "localhost"):
                 return ""
-            url = "http://ip-api.com/json/%s?fields=status,country,city" % ip
+            now = time.time()
+            hit = GEO_CACHE.get(ip)
+            if hit and now - hit[0] < GEO_CACHE_TTL:
+                return hit[1]
+            url = ("http://ip-api.com/json/%s?fields=status,country,city,isp,org&lang=ru"
+                   % urllib.parse.quote(ip))
             with urllib.request.urlopen(url, timeout=5) as r:
                 data = json.loads(r.read().decode("utf-8", "ignore"))
             if data.get("status") != "success":
                 return ""
-            return ", ".join(p for p in (data.get("country") or "", data.get("city") or "") if p)
+            city = (data.get("city") or "").strip()
+            country = (data.get("country") or "").strip()
+            if city and country:
+                place = "%s (%s)" % (city, country)
+            else:
+                place = city or country
+            isp = (data.get("isp") or data.get("org") or "").strip()
+            if place and isp:
+                text = "%s, провайдер %s" % (place, isp)
+            else:
+                text = place or isp
+            if len(GEO_CACHE) >= GEO_CACHE_MAX:
+                GEO_CACHE.clear()
+            GEO_CACHE[ip] = (now, text)
+            return text
         except Exception as e:
             log("ip geo err: %s" % str(e)[:100])
             return ""
 
     def _welcome_join(self, user):
-        """При входе пользователя на сервер — приветствие с ником, IP и гео в канал TeamTalk."""
+        """При входе пользователя на сервер — приветствие с ником, городом и
+        провайдером в канал TeamTalk (IP не показываем)."""
         try:
             if not self.logged_in or not user or not self.my_channel_id:
                 return
@@ -3590,12 +3621,13 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _welcome_do(self, nick, ip):
         """Гео-резолв и отправка приветствия сетевым сообщением (всем на сервере,
-        в любом канале). В фоне — не блокирует событийный цикл."""
+        в любом канале). В фоне — не блокирует событийный цикл. В сообщении только
+        город и провайдер: IP наружу не отдаём."""
         try:
             geo = self._ip_geo(ip)
             text = "Привет, %s. Добро пожаловать на сервер %s." % (nick, self._server_name())
-            if ip:
-                text += "\nIP: %s%s" % (ip, (" (%s)" % geo) if geo else "")
+            if geo:
+                text += "\nЗаходит из: %s" % geo
             text += "\n%s" % (WELCOME_RULES or "Ознакомься, пожалуйста, с правилами сервера.")
             self._send_network_msg(text)
         except Exception as e:
