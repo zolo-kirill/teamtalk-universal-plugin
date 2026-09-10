@@ -34,6 +34,25 @@ from TeamTalk5 import (
 USERNAME_RE = re.compile(r"^[\w.\-]{3,32}$", re.UNICODE)
 CREATE_TIMEOUT_SEC = 10
 
+# Telegram API ходит через локальный прокси, если он задан в окружении
+# (TG_PROXY): дата-центр сервера DPI-блокирует исходящие TCP к подсетям
+# Telegram, поэтому прямой urlopen отсюда не работает. См. bot.py.
+TG_PROXY = os.environ.get("TG_PROXY", "").strip()
+_TG_OPENER = None
+
+
+def _urlopen(req, timeout):
+    """urlopen: при заданном TG_PROXY запрос к Telegram API идёт через прокси."""
+    global _TG_OPENER
+    if TG_PROXY:
+        if _TG_OPENER is None:
+            _TG_OPENER = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": TG_PROXY, "https": TG_PROXY})
+            )
+        return _TG_OPENER.open(req, timeout=timeout)
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
 # Права обычной (не администраторской) учётной записи, которую создаёт
 # регистратор. Состав — по галочкам в клиенте TeamTalk:
 #   Войти несколько раз ................. USERRIGHT_MULTI_LOGIN
@@ -181,7 +200,7 @@ class Registrar(object):
         url = "https://api.telegram.org/bot%s/%s" % (self.token, method)
         data = urllib.parse.urlencode(params).encode()
         req = urllib.request.Request(url, data=data, method="POST")
-        with urllib.request.urlopen(req, timeout=70) as r:
+        with _urlopen(req, 70) as r:
             return json.loads(r.read().decode())
 
     def _tg_send(self, chat_id, text, reply_markup=None):
@@ -227,7 +246,7 @@ class Registrar(object):
         req = urllib.request.Request(url, data=body, method="POST", headers={
             "Content-Type": "multipart/form-data; boundary=%s" % boundary,
         })
-        with urllib.request.urlopen(req, timeout=70) as r:
+        with _urlopen(req, 70) as r:
             return json.loads(r.read().decode())
 
     @staticmethod
