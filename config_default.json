@@ -54,7 +54,8 @@
         "broadcast_text": "Пользователь {username} зарегистрирован на сервере",
         "admin_username": "bot_admin",
         "admin_password": "",
-        "admin_nickname": "регистратор"
+        "admin_nickname": "регистратор",
+        "user_rights": 0
     },
     "account_watch": {
         "enabled": true,

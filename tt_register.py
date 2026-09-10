@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from TeamTalk5 import (
     TeamTalk,
     UserAccount,
+    UserRight,
     UserType,
     TextMsgType,
     buildTextMessage,
@@ -32,6 +33,30 @@ from TeamTalk5 import (
 
 USERNAME_RE = re.compile(r"^[\w.\-]{3,32}$", re.UNICODE)
 CREATE_TIMEOUT_SEC = 10
+
+# Права обычной (не администраторской) учётной записи, которую создаёт
+# регистратор. Состав — по галочкам в клиенте TeamTalk:
+#   Войти несколько раз ................. USERRIGHT_MULTI_LOGIN
+#   Изменять ник ........................ USERRIGHT_LOCKED_NICKNAME НЕ выставляем:
+#                                         это право «наоборот», его наличие ник
+#                                         как раз запрещает.
+#   Видеть пользователей во всех каналах  USERRIGHT_VIEW_ALL_USERS
+#   Создание временных каналов .......... USERRIGHT_CREATE_TEMPORARY_CHANNEL
+#   Загружать файлы ..................... USERRIGHT_UPLOAD_FILES
+#   Выгружать файлы ..................... USERRIGHT_DOWNLOAD_FILES
+#   Передавать голосовые данные: микрофон USERRIGHT_TRANSMIT_VOICE
+#   Транслировать аудио файлы wav, mp3 .. USERRIGHT_TRANSMIT_MEDIAFILE_AUDIO
+#   Отправлять личные сообщения ......... USERRIGHT_TEXTMESSAGE_USER
+#   Отправлять сообщения канала ......... USERRIGHT_TEXTMESSAGE_CHANNEL
+DEFAULT_USER_RIGHTS = (UserRight.USERRIGHT_MULTI_LOGIN
+                       | UserRight.USERRIGHT_VIEW_ALL_USERS
+                       | UserRight.USERRIGHT_CREATE_TEMPORARY_CHANNEL
+                       | UserRight.USERRIGHT_UPLOAD_FILES
+                       | UserRight.USERRIGHT_DOWNLOAD_FILES
+                       | UserRight.USERRIGHT_TRANSMIT_VOICE
+                       | UserRight.USERRIGHT_TRANSMIT_MEDIAFILE_AUDIO
+                       | UserRight.USERRIGHT_TEXTMESSAGE_USER
+                       | UserRight.USERRIGHT_TEXTMESSAGE_CHANNEL)
 
 
 def _ttstr(value):
@@ -91,6 +116,9 @@ class Registrar(object):
         self.log = log_fn
         self.token = cfg.get("token", "")
         self.admin_ids = [int(x) for x in (cfg.get("admin_user_ids") or []) if x]
+        # права новой учётки: registration.user_rights в config.json,
+        # 0/пусто — набор по умолчанию (DEFAULT_USER_RIGHTS)
+        self.user_rights = int(cfg.get("user_rights") or 0) or DEFAULT_USER_RIGHTS
         self.state_file = cfg["state_file"]
         self.state = self._load_state()
         self.offset = int(self.state.get("tg_offset", 0) or 0)
@@ -554,7 +582,9 @@ class Registrar(object):
         ua.szUsername = req["username"].encode("utf-8")
         ua.szPassword = req["password"].encode("utf-8")
         ua.uUserType = UserType.USERTYPE_ADMIN if is_admin else UserType.USERTYPE_DEFAULT
-        ua.uUserRights = 0
+        # админ по умолчанию имеет все права (uUserRights=0); обычной учётке
+        # выдаём набор из registration.user_rights / DEFAULT_USER_RIGHTS
+        ua.uUserRights = 0 if is_admin else self.user_rights
         ua.szInitChannel = b"/"
         try:
             cmd = self.tt.doNewUserAccount(ua)
@@ -684,7 +714,7 @@ class Registrar(object):
 def start(cfg, log_fn=print):
     """Запускает регистратор. cfg — dict с ключами token, admin_user_ids,
     hostname, tcp_port, udp_port, tt_username, tt_password, tt_nickname,
-    broadcast_text, state_file. Возвращает Registrar или None."""
+    user_rights, broadcast_text, state_file. Возвращает Registrar или None."""
     if not cfg or not cfg.get("token") or not cfg.get("admin_user_ids"):
         return None
     reg = Registrar(cfg, log_fn)
