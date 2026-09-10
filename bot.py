@@ -293,6 +293,9 @@ REG_BROADCAST_TEXT = str(_cfg("registration.broadcast_text", None, "")).strip()
 REG_ADMIN_TT_USER = str(_cfg("registration.admin_username", "TEAMTALK_ADMIN_USER", "bot_admin")).strip()
 REG_ADMIN_TT_PASS = str(_cfg("registration.admin_password", "TEAMTALK_ADMIN_PASSWORD", "")).strip()
 REG_ADMIN_TT_NICK = str(_cfg("registration.admin_nickname", None, "регистратор")).strip()
+# Права новых учёток (registration.user_rights): 0 — набор по умолчанию из
+# tt_register.DEFAULT_USER_RIGHTS (микрофон, файлы, ЛС, сообщения канала и т.д.).
+REG_USER_RIGHTS = int(_cfg("registration.user_rights", None, 0) or 0)
 
 # Optional YouTube cookies to bypass bot-check on restricted videos.
 COOKIES = _cfg("services.yt.cookiefile_path", "TEAMTALK_COOKIES", None) or os.path.join(
@@ -4414,6 +4417,7 @@ def main():
                 "tt_username": REG_ADMIN_TT_USER,
                 "tt_password": REG_ADMIN_TT_PASS,
                 "tt_nickname": REG_ADMIN_TT_NICK,
+                "user_rights": REG_USER_RIGHTS,
                 "state_file": os.path.join(BASE_DIR, "register_requests.json"),
                 "log_fn": log,
             })
