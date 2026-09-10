@@ -3627,7 +3627,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             geo = self._ip_geo(ip)
             text = "Привет, %s. Добро пожаловать на сервер %s." % (nick, self._server_name())
             if geo:
-                text += "\nЗаходит из: %s" % geo
+                text += "\n%s" % geo
             text += "\n%s" % (WELCOME_RULES or "Ознакомься, пожалуйста, с правилами сервера.")
             self._send_network_msg(text)
         except Exception as e:
