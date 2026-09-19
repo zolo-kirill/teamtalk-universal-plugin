@@ -77,7 +77,11 @@ def _yt_proxy():
                     return YT_TUNNEL
             except OSError:
                 pass
-        return YT_PROXY  # '' → напрямую
+        # Туннель настроен, но лежит: раньше здесь возвращался только YT_PROXY,
+        # и при пустом YT_PROXY бот уходил напрямую — а дата-центр режет YouTube,
+        # так что видео не качалось вовсе, пока не поднимут домашний туннель.
+        # Откат должен вести на общий мост, как и в ветке без туннеля.
+        return YT_PROXY or TG_PROXY
     return YT_PROXY or TG_PROXY
 
 
@@ -267,6 +271,11 @@ ACC_WATCH_ENABLED  = bool(_cfg("account_watch.enabled", None, True))
 ACC_WATCH_INTERVAL = int(_cfg("account_watch.interval_sec", None, 10) or 10)
 ACC_WATCH_PAGE     = int(_cfg("account_watch.page_size", None, 50) or 50)
 ACC_WATCH_NOTIFY   = bool(_cfg("account_watch.notify_owner", None, True))
+# Пауза между личным предупреждением и киком: человек должен успеть прочитать,
+# зачем его выбрасывает. 0 — кикать сразу (account_watch.notice_delay_sec).
+ACC_WATCH_NOTICE_DELAY = float(_cfg("account_watch.notice_delay_sec", None, 5) or 5)
+ACC_WATCH_NOTICE_TEXT  = ("Права твоей учётной записи изменились. "
+                          "Перезайди на сервер, чтобы они вступили в силу.")
 
 # Приветствие при входе пользователя на сервер: просьба ознакомиться с правилами
 # (welcome.rules_text в config.json; пусто — стандартная строка).
@@ -1682,6 +1691,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                     "-f", "ba/b",
                     "--remote-components", "ejs:github",
                     "--extractor-args", "youtube:player_client=%s" % client,
+                    "--throttled-rate", "250K",
                     "-o", out + ".%(ext)s",
                     "--print", "%(title)s",
                 ]
@@ -1994,6 +2004,12 @@ class MusicBot(TeamTalk5.TeamTalk):
                     # и играем его через ffmpeg — в голосовом канале контейнер не важен.
                     "-f", "ba/b",
                     "--remote-components", "ejs:github",
+                    # Узлы балансера очень разные по скорости: через один ролик идёт
+                    # на мегабайтах в секунду, через другой ползёт на десятках килобайт
+                    # (проверено 2026-09-12: 5.5 МБ/с против ~40 КБ/с на одном и том же
+                    # видео). Если поток просел ниже порога — yt-dlp переизвлекает ссылку,
+                    # а новое соединение балансер ведёт уже через другой узел.
+                    "--throttled-rate", "250K",
                     "-o", out + ".%(ext)s",
                     "--print", "%(title)s",
                 ]
@@ -2036,7 +2052,14 @@ class MusicBot(TeamTalk5.TeamTalk):
                     # rc=0 без файла (молчаливый отказ YouTube) — это тоже ошибка
                     if rc != 0 or not audio:
                         if "Sign in to confirm" in err_text or "LOGIN_REQUIRED" in err_text:
-                            self.api_q.put(("download_fail", url, title, "YouTube это видео с сервера не отдаёт — просит войти в аккаунт (обычно возрастное ограничение). С серверного адреса такое не обойти, попробуй другой ролик."))
+                            # Проверено 2026-09-12: тот же ролик проходит со второй-третьей
+                            # попытки — балансер каждый раз выходит через другой узел, и часть
+                            # узлов YouTube отдаёт без входа. Поэтому не сдаёмся с первого раза.
+                            if attempt < 3:
+                                self.api_q.put(("status", "YouTube просит вход. Пробую другой узел — повтор %d из 3." % attempt))
+                                time.sleep(5)
+                                continue
+                            self.api_q.put(("download_fail", url, title, "YouTube это видео с сервера не отдаёт — просит войти в аккаунт. Три узла подряд отказали, скорее всего ролик возрастной или закрытый. Попробуй другой."))
                             return
                         err_msg = (err_text.splitlines()[-1] if err_text else "yt-dlp failed")[:300]
                         if attempt < 3:
@@ -3671,6 +3694,11 @@ class MusicBot(TeamTalk5.TeamTalk):
             "ranges_file": rf,
             "nick_enabled": bool(_g(p, "botnet_nick_check", True)),
             "empty_nick_enabled": bool(_g(p, "kick_empty_nick", True)),
+            # Пустой ник режем у ВСЕХ учёток, а не только у гостевых
+            # (решение владельца 2026-09-18).
+            "empty_nick_all": bool(_g(p, "kick_empty_nick_all", True)),
+            # Пустой ник: только кик (False) или кик с баном по IP (True).
+            "empty_nick_ban": bool(_g(p, "kick_empty_nick_ban", True)),
             "nick_max_len": int(_g(p, "max_nick_len", _DEFAULT_NICK_MAX_LEN) or 0),
             "mat_enabled": bool(_g(p, "mat_check", True)),
             "mat_re": _compile_mat_re(_g(p, "mat_words", _DEFAULT_MAT_ROOTS) or _DEFAULT_MAT_ROOTS),
@@ -3761,7 +3789,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         return bool(int(getattr(user, "uUserType", 0) or 0) & 2)
 
     def _prot_is_guest_login(self, username):
-        """Гостевая/публичная учётка — ЕДИНСТВЕННЫЕ, кого проверяем.
+        """Гостевая/публичная учётка — проходит ВСЕ проверки защиты.
         Пустое имя пользователя (анонимный гость) и учётки из
         guard.guest_logins (у владельца это «1», у других серверов
         может быть «guest», «public» или пустая). Все прочие учётные записи
@@ -3789,7 +3817,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         """Первая сработавшая проверка. Возвращает (reason, kick_only);
         (None, False) — вход разрешён."""
         if self._prot_cfg["empty_nick_enabled"] and not nick:
-            return ("пустой ник (учётка «%s»)" % (username or "?"), True)
+            return ("пустой ник (учётка «%s»)" % (username or "?"),
+                    not self._prot_cfg["empty_nick_ban"])
         if self._prot_cfg["nick_enabled"] and nick and _is_botnet_nick(nick):
             return ("ботнет-ник «%s»" % nick[:28], False)
         mlen = self._prot_cfg["nick_max_len"]
@@ -3836,7 +3865,8 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _prot_check_login(self, user):
         """Хук из onCmdUserLoggedIn: на КАЖДЫЙ вход (в т.ч. реплей после
-        рестарта бота). Вердикт получает только гостевая/публичная учётка."""
+        рестарта бота). Гостевые учётки проходят все проверки, негостевые —
+        только проверку пустого ника (guard.kick_empty_nick_all)."""
         try:
             if not self._prot_cfg.get("enabled") or not user or not self.logged_in:
                 return
@@ -3851,11 +3881,19 @@ class MusicBot(TeamTalk5.TeamTalk):
             username = self._tt_field(user, "szUsername") or ""
             if self._prot_is_admin(user, uid):
                 return  # сам бот и админы — доверяем всегда (владелец под VPN)
-            if not self._prot_is_guest_login(username):
-                return  # не гостевая учётка — доверяем, не проверяем
             if self._prot_in_whitelist(username, nick, ip):
-                return  # явный пропуск даже на гостевой
-            self._prot_burst_track(ip)
+                return  # явный пропуск: и гостевая, и мимо пустого ника
+            guest = self._prot_is_guest_login(username)
+            if not guest:
+                # Негостевая учётка. Проверяем ровно одно — пустой ник:
+                # безымянный вход в списке пользователей неотличим от
+                # анонима. Ботнет-ник, мат, гео и всплеск остаются только
+                # для гостевых — иначе под них попадут живые люди.
+                if not (self._prot_cfg["empty_nick_all"]
+                        and self._prot_cfg["empty_nick_enabled"] and not nick):
+                    return
+            if guest:
+                self._prot_burst_track(ip)
             reason, kick_only = self._prot_decide(nick, username, ip)
             if not reason:
                 return
@@ -3886,7 +3924,10 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _prot_ban_one(self, uid, nick, username, ip, reason, kick_only):
         banned = False
-        if not kick_only and ip and ip not in self._banned_ips:
+        # Бан выдаём КАЖДЫЙ раз, даже если этот IP уже отмечен у нас: серверный
+        # бан мог снять человек из клиента, а мы об этом не узнаем. Дедуп ниже
+        # гасит только повторный отчёт в Telegram, не саму команду бана.
+        if not kick_only and ip:
             try:
                 # бан по uid ДО кика — сервер знает сессию и сам впишет ник/username
                 # в бан-лист (doBanIPAddress по голому IP пишет пустые поля)
@@ -3907,9 +3948,11 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception as e:
             log("protection kick err: %s" % str(e)[:120])
         if kick_only or not ip or not banned:
-            # кик без бана (kick_only/нет IP) либо IP уже в бане — просто событие
+            # кик без бана (kick_only/нет IP) либо забанить не вышло — событие
             self._prot_note(reason)
             return
+        if ip in self._banned_ips:
+            return  # этот IP уже отмечен и доложен — второй раз молчим
         self._banned_ips.add(ip)
         self.bans[str(uid)] = {
             "nick": nick,
@@ -4090,12 +4133,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return
             for uname, targets in by_uname.items():
                 for uid, nick in targets:
-                    try:
-                        self.doKickUser(uid, 0)
-                        log("account watch: права учётки «%s» изменились — кик %s (id %d)"
-                            % (uname, nick, uid))
-                    except Exception as e:
-                        log("account watch kick err: %s" % str(e)[:120])
+                    self._acc_warn_then_kick(uid, nick, uname)
             if ACC_WATCH_NOTIFY and (TG_NOTIFY_CHAT_ID or TG_OWNER_USER_ID):
                 lines = ["- «%s»: %s" % (u, ", ".join(n for _, n in by_uname[u]))
                          for u in sorted(by_uname)]
@@ -4103,6 +4141,30 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._tg_send_notify(text, int(TG_NOTIFY_CHAT_ID or TG_OWNER_USER_ID))
         except Exception as e:
             log("account watch process err: %s" % str(e)[:150])
+
+    def _acc_warn_then_kick(self, uid, nick, uname):
+        """Сперва личное сообщение, потом (через паузу) кик.
+
+        Сервер применяет права учётки при входе, поэтому без переподключения
+        человек останется со старыми правами — но выкидывать молча невежливо,
+        пусть сначала прочитает, почему его выбрасывает. Ожидание и кик идут
+        в отдельном потоке: событийный цикл TeamTalk не блокируем.
+        """
+        def _do():
+            try:
+                self._send_to_tt_user(uid, ACC_WATCH_NOTICE_TEXT)
+            except Exception as e:
+                log("account watch notice err: %s" % str(e)[:120])
+            delay = ACC_WATCH_NOTICE_DELAY
+            if delay > 0:
+                time.sleep(delay)
+            try:
+                self.doKickUser(uid, 0)
+                log("account watch: права учётки «%s» изменились — предупредил и выкинул %s (id %d)"
+                    % (uname, nick, uid))
+            except Exception as e:
+                log("account watch kick err: %s" % str(e)[:120])
+        threading.Thread(target=_do, daemon=True, name="acc-warn-kick").start()
 
     def onUserAccount(self, useraccount):
         """Пришёл один UserAccount в ответ на наш список — копим в буфер."""

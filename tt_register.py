@@ -14,7 +14,6 @@ telegram_registration.admin_username / admin_password) и шлёт сетево�
 import json
 import os
 import queue
-import re
 import threading
 import time
 import urllib.parse
@@ -31,7 +30,17 @@ from TeamTalk5 import (
     buildTextMessage,
 )
 
-USERNAME_RE = re.compile(r"^[\w.\-]{3,32}$", re.UNICODE)
+# Логин в регистраторе принимается почти любой (просьба владельца). Ограничения
+# оставлены только те, без которых ломается сам механизм, а не вкусовые:
+#   * перевод строки и управляющие символы рвут XML в .tt-файле и вёрстку
+#     сообщений;
+#   * szUsername в TeamTalk — это char[TT_STRLEN], TT_STRLEN = 512, то есть
+#     511 байт под сам логин в UTF-8.
+# Кавычка и слэши в логине теперь разрешены — их вычищает safe_tt_filename()
+# там, где логин становится именем файла.
+# Пробелы внутри логина разрешены, по краям — обрезаются (это почти всегда
+# случайность, а логин с невидимым пробелом на конце потом не ввести).
+USERNAME_MAX_BYTES = 511
 CREATE_TIMEOUT_SEC = 10
 
 # Telegram API ходит через локальный прокси, если он задан в окружении
@@ -39,6 +48,28 @@ CREATE_TIMEOUT_SEC = 10
 # Telegram, поэтому прямой urlopen отсюда не работает. См. bot.py.
 TG_PROXY = os.environ.get("TG_PROXY", "").strip()
 _TG_OPENER = None
+
+
+def username_problem(name):
+    """Проверяет логин и возвращает причину отказа либо None, если он годится."""
+    if not name:
+        return "Логин пустой. Введите имя пользователя."
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+        return ("В логине не должно быть переводов строк и управляющих символов. "
+                "Попробуйте ещё раз.")
+    if len(name.encode("utf-8")) > USERNAME_MAX_BYTES:
+        return ("Слишком длинный логин — не больше %d байт. Попробуйте короче."
+                % USERNAME_MAX_BYTES)
+    return None
+
+
+def safe_tt_filename(username):
+    """Имя .tt-файла для Telegram. Логин теперь любой, поэтому выкидываем всё,
+    что рвёт multipart-заголовок filename=... (кавычка, перевод строки) или
+    выглядит как путь (слэши)."""
+    cleaned = "".join(ch for ch in username
+                      if ch not in '"\\/\r\n\t' and ord(ch) >= 32)
+    return (cleaned.strip() or "teamtalk") + ".tt"
 
 
 def _urlopen(req, timeout):
@@ -295,7 +326,7 @@ class Registrar(object):
         try:
             content = self._tt_file_content(username, password)
             self._tg_send_document(
-                tg_user_id, username + ".tt", content.encode("utf-8"),
+                tg_user_id, safe_tt_filename(username), content.encode("utf-8"),
                 caption="Учётная запись TeamTalk. Логин: %s" % username)
             self.log("регистратор: .tt файл отправлен %s (%s)" % (tg_user_id, username))
         except Exception as e:
@@ -420,20 +451,21 @@ class Registrar(object):
             self._tg_send(chat_id, "У тебя уже есть заявка на проверке. Жди решения администратора.")
             return
         self.conv[user_id] = {"step": "await_username"}
-        self._tg_send(chat_id, "Здравствуйте! Пожалуйста, введите ваше имя пользователя: "
-                               "буквы, цифры, точка, дефис или подчёркивание, от 3 до 32 символов, без пробелов.")
+        self._tg_send(chat_id, "Здравствуйте! Пожалуйста, введите ваше имя пользователя — "
+                               "любое, какое хотите. Единственное, чего быть не должно: "
+                               "переводов строк и управляющих символов.")
 
     def _start_create(self, chat_id, user_id):
         self.conv[user_id] = {"step": "await_username", "creator": True}
         self._tg_send(chat_id, "Создание учётной записи.\n"
-                               "Введи имя пользователя: буквы, цифры, точка, дефис или "
-                               "подчёркивание, от 3 до 32 символов, без пробелов.")
+                               "Введи имя пользователя — любое, какое нужно. Без переводов "
+                               "строк и управляющих символов.")
 
     def _on_username(self, chat_id, user_id, text):
         name = text.strip()
-        if not USERNAME_RE.match(name):
-            self._tg_send(chat_id, "Логин не подходит. Нужны буквы, цифры, точка, дефис или "
-                                   "подчёркивание, от 3 до 32 символов, без пробелов. Попробуй ещё раз.")
+        problem = username_problem(name)
+        if problem:
+            self._tg_send(chat_id, problem)
             return
         if self._username_pending(name):
             self._tg_send(chat_id, "Этот логин уже занят другой заявкой. Выбери другой.")
