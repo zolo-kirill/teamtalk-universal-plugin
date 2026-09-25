@@ -4268,6 +4268,11 @@ class MusicBot(TeamTalk5.TeamTalk):
         if textmessage.nFromUserID == self.my_user_id:
             return
         try:
+            # Реагируем только на личные сообщения (MSGTYPE_USER). Всё, что
+            # приходит в канал (ссылки, команды, текст), бот полностью игнорирует —
+            # не видит и не отвечает.
+            if int(getattr(textmessage, "nMsgType", 0) or 0) != TextMsgType.MSGTYPE_USER:
+                return
             msg = textmessage.szMessage
             if isinstance(msg, bytes):
                 msg = msg.decode("utf-8", "ignore")
@@ -4279,18 +4284,16 @@ class MusicBot(TeamTalk5.TeamTalk):
                 log("typing indicator from %d, skip" % textmessage.nFromUserID)
                 return
             # команды — только со слэшем (/sub, /play, ...). Исключение:
-            # сообщение-ссылка (ровно один URL и больше ничего) — в личку боту
-            # или в канал вставленную ссылку играем напрямую (минуя play-ветку:
-            # /play ссылки не принимает, для них /u или вставка).
-            # Прочие не-команды: в личку — пересылаем админам (можно ответить),
-            # в канал — игнорируем (пересылка только засоряла чат)
+            # сообщение-ссылка (ровно один URL и больше ничего) в личку боту —
+            # играем напрямую (минуя play-ветку: /play ссылки не принимает,
+            # для них /u или вставка).
+            # Прочие не-команды: пересылаем админам (можно ответить).
             if not self._is_tt_command(msg):
                 bare = self._bare_link(msg)
                 if bare:
                     self._handle_url(bare, bare)
                     return
-                if int(getattr(textmessage, "nMsgType", 0) or 0) == TextMsgType.MSGTYPE_USER:
-                    self._tt_forward_private(textmessage.nFromUserID, msg)
+                self._tt_forward_private(textmessage.nFromUserID, msg)
                 return
             self._handle_cmd(msg, textmessage.nFromUserID)
         except Exception as e:
