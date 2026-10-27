@@ -1,0 +1,14 @@
+[Unit]
+Description=Silero TTS worker for TeamTalk plugin
+
+[Service]
+Type=simple
+WorkingDirectory=__DIR__
+Environment=HOME=%h
+ExecStart=__DIR__/.venv/bin/python __DIR__/tts_worker.py
+Restart=always
+RestartSec=5
+Nice=10
+
+[Install]
+WantedBy=default.target

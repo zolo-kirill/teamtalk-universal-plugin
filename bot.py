@@ -2,6 +2,8 @@
 """Универсальный плагин для TeamTalk-сервера: музыка в голосовой канал,
 реле сообщений и файлов в Telegram, защита от ботнетов, регистрация учёток."""
 import array
+import base64
+import hashlib
 import ctypes
 import json
 import os
@@ -390,6 +392,18 @@ ACC_WATCH_NOTICE_TEXT  = ("Права учётной записи изменил
 WELCOME_RULES = str(_cfg("welcome.rules_text", None, "") or "").strip()
 WELCOME_TEXT_ENABLED = bool(_cfg("welcome.text_enabled", None, True))
 
+# ---- Голосовое приветствие (Silero TTS) ------------------------------
+WELCOME_VOICE_ENABLED = bool(_cfg("welcome.voice_enabled", None, True))
+WELCOME_VOICE_TEXT = str(_cfg("welcome.voice_text", None,
+    "Привет, {nick}! Добро пожаловать на сервер {server}.") or "").strip()
+WELCOME_VOICE_SPEAKER = str(_cfg("welcome.voice_speaker", None, "baya") or "baya").strip()
+WELCOME_VOICE_DUCK = float(_cfg("welcome.voice_duck", None, 0.15) or 0.15)
+WELCOME_VOICE_COOLDOWN = int(_cfg("welcome.voice_cooldown", None, 900) or 900)
+SILERO_MODEL_ID = str(_cfg("welcome.silero_model", None, "v4_ru") or "v4_ru")
+TTS_SOCK = str(_cfg("welcome.tts_socket", None, "") or os.path.join(CACHE_DIR, "tts.sock"))
+_SILERO_LOCK = threading.Lock()
+_SILERO = {"model": None}
+
 # Кэш гео-резолва (ip -> (время, «город, страна · провайдер»)): один и тот же
 # адрес не дёргаем повторно, у бесплатного ip-api.com лимит запросов в минуту.
 GEO_CACHE = {}
@@ -633,6 +647,12 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.paused = False
         self.volume = min(DEFAULT_VOLUME, MAX_VOLUME)
         self.cur_vol = self.volume / 100.0  # actual gain, ramps toward self.volume
+        self.duck = 1.0  # множитель приглушения (голосовое приветствие)
+        self._greet_buf = None  # PCM приветствия, подмешивается в поток
+        self._greet_pos = 0
+        self._greet_lock = threading.Lock()
+        self._greet_seen = {}
+        self._greet_seen_lock = threading.Lock()
         self.service = DEFAULT_SERVICE  # "yt" = YouTube, "ym" = Yandex.Music
         self.cur_offset_ms = 0
         self.segment_started_at = 0
@@ -766,7 +786,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         Each call is one 20 ms block; self.cur_vol steps ~2% toward self.volume,
         so a full-scale change eases in over ~1 second instead of snapping.
         """
-        target = self.volume / 100.0
+        target = (self.volume / 100.0) * self.duck
         cur = self.cur_vol
         if cur < target:
             cur = min(target, cur + 0.02)
@@ -2503,7 +2523,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                     next_slot = time.monotonic()  # behind: don't compound backlog
                 chunk = buf[:VOICE_CHUNK_BYTES]
                 buf = buf[VOICE_CHUNK_BYTES:]
-                chunk = self._scale_pcm(chunk)
+                chunk = self._mix_greet(self._scale_pcm(chunk))
                 raw = (ctypes.c_char * VOICE_CHUNK_BYTES).from_buffer_copy(chunk)
                 ab = TeamTalk5.AudioBlock()
                 ab.nStreamID = stream_id
@@ -2530,7 +2550,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                     chunk = buf[i:i + VOICE_CHUNK_BYTES]
                     if len(chunk) < VOICE_CHUNK_BYTES:
                         chunk += b"\x00" * (VOICE_CHUNK_BYTES - len(chunk))
-                    chunk = self._scale_pcm(chunk)
+                    chunk = self._mix_greet(self._scale_pcm(chunk))
                     raw = (ctypes.c_char * VOICE_CHUNK_BYTES).from_buffer_copy(chunk)
                     ab = TeamTalk5.AudioBlock()
                     ab.nStreamID = stream_id
@@ -3572,6 +3592,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.my_user_id = userid
         self.logged_in = True
         log("logged in as %s (user id %d)" % (self.nickname, userid))
+        threading.Thread(target=self._silero_preload, daemon=True).start()
         target = CHANNEL if CHANNEL else "/"
         cid = self.getChannelIDFromPath(target)
         if not cid:
@@ -4068,6 +4089,176 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("ip geo err: %s" % str(e)[:100])
             return ""
 
+    # ---- голосовое приветствие (Silero TTS) -------------------------
+    def _silero_preload(self):
+        """Проверить, что воркер синтеза жив.
+
+        Сам Silero живёт в отдельном процессе (tts_worker.py), поэтому здесь
+        нет ни torch, ни загрузки модели — только PING по сокету.
+        """
+        if not WELCOME_VOICE_ENABLED or not WELCOME_VOICE_TEXT:
+            return
+        try:
+            sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sk.settimeout(5)
+            sk.connect(TTS_SOCK)
+            sk.sendall(b"PING\n")
+            ans = sk.recv(64).decode("utf-8", "replace").strip()
+            sk.close()
+            log("silero: воркер %s (%s)" % (ans or "?", TTS_SOCK))
+        except Exception as e:
+            log("silero: воркер недоступен (%s) — приветствие будет без голоса" % str(e)[:120])
+
+    def _mix_greet(self, chunk):
+        """Подмешать PCM приветствия в блок, уходящий в TeamTalk."""
+        if self._greet_buf is None:
+            return chunk
+        with self._greet_lock:
+            gb = self._greet_buf
+            if gb is None:
+                return chunk
+            pos = self._greet_pos
+            if pos >= len(gb):
+                self._greet_buf = None
+                self._greet_pos = 0
+                return chunk
+            take = min(len(chunk), len(gb) - pos)
+            if take % 2:
+                take -= 1
+            seg = gb[pos:pos + take]
+            self._greet_pos = pos + take
+            done = self._greet_pos >= len(gb)
+            if done:
+                self._greet_buf = None
+                self._greet_pos = 0
+        if take <= 0:
+            return chunk
+        out = bytearray(chunk)
+        a = array.array("h")
+        a.frombytes(seg)
+        b = array.array("h")
+        b.frombytes(bytes(out[:take]))
+        for i in range(len(a)):
+            v = a[i] + b[i]
+            b[i] = 32767 if v > 32767 else (-32768 if v < -32768 else v)
+        out[:take] = b.tobytes()
+        return bytes(out)
+
+    def _tts_silero_pcm(self, text):
+        """Silero TTS -> s16le стерео 48 кГц.
+
+        Синтез вынесен в отдельный процесс (tts_worker.py): torch в одном
+        процессе с TeamTalk SDK роняет бота в segfault. Здесь только запрос
+        по unix-сокету и чтение готового raw-файла из кэша.
+        """
+        if not text:
+            return None
+        key = hashlib.sha1(("%s|%s" % (WELCOME_VOICE_SPEAKER, text)).encode("utf-8")).hexdigest()[:16]
+        raw = os.path.join(CACHE_DIR, "greet_%s.raw" % key)
+        if os.path.exists(raw) and os.path.getsize(raw) > 1000:
+            try:
+                with open(raw, "rb") as f:
+                    return f.read()
+            except Exception:
+                pass
+        try:
+            payload = "TEXT\t%s\t%s\n" % (
+                WELCOME_VOICE_SPEAKER,
+                base64.b64encode(text.encode("utf-8")).decode("ascii"),
+            )
+            sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sk.settimeout(120)
+            sk.connect(TTS_SOCK)
+            sk.sendall(payload.encode("utf-8"))
+            buf = b""
+            while b"\n" not in buf:
+                data = sk.recv(4096)
+                if not data:
+                    break
+                buf += data
+            sk.close()
+            line = buf.split(b"\n", 1)[0].decode("utf-8", "replace").strip()
+            if not line.startswith("OK "):
+                log("silero tts err: %s" % line[:200])
+                return None
+            with open(line[3:].strip(), "rb") as f:
+                data = f.read()
+            log("silero: синтез %d симв. -> %.1f с" % (len(text), len(data) / float(VOICE_RATE * 2 * VOICE_CHANNELS)))
+            return data
+        except Exception as e:
+            log("silero tts err: %s" % str(e)[:200])
+            return None
+
+    def _greet_wav(self, text, pcm):
+        """WAV-файл приветствия (для случая, когда музыка не играет)."""
+        import wave
+        key = hashlib.sha1(("%s|%s|%s" % (WELCOME_VOICE_SPEAKER, VOICE_RATE, text)).encode("utf-8")).hexdigest()[:16]
+        path = os.path.join(CACHE_DIR, "greet_%s.wav" % key)
+        if os.path.exists(path) and os.path.getsize(path) > 1000:
+            return path
+        try:
+            with wave.open(path, "wb") as w:
+                w.setnchannels(VOICE_CHANNELS)
+                w.setsampwidth(2)
+                w.setframerate(VOICE_RATE)
+                w.writeframes(pcm)
+            return path
+        except Exception as e:
+            log("greet wav err: %s" % str(e)[:120])
+            return None
+
+    def _greet_voice(self, nick):
+        """Озвучить приветствие. Не чаще WELCOME_VOICE_COOLDOWN на человека."""
+        if not WELCOME_VOICE_ENABLED or not WELCOME_VOICE_TEXT:
+            return
+        try:
+            key = (nick or "").strip().lower()
+            now = time.time()
+            with self._greet_seen_lock:
+                if now - self._greet_seen.get(key, 0) < WELCOME_VOICE_COOLDOWN:
+                    return
+                self._greet_seen[key] = now
+                if len(self._greet_seen) > 500:
+                    self._greet_seen.clear()
+                    self._greet_seen[key] = now
+            text = WELCOME_VOICE_TEXT.format(nick=nick, server=self._server_name() or "сервер")
+            threading.Thread(target=self._greet_voice_worker, args=(text,), daemon=True).start()
+        except Exception as e:
+            log("greet voice err: %s" % str(e)[:150])
+
+    def _greet_voice_worker(self, text):
+        pcm = self._tts_silero_pcm(text)
+        if not pcm:
+            return
+        dur = len(pcm) / float(VOICE_RATE * VOICE_CHANNELS * 2)
+        music = bool(self.playing and not self.paused)
+        if music:
+            with self._greet_lock:
+                self._greet_buf = pcm
+                self._greet_pos = 0
+            self.duck = WELCOME_VOICE_DUCK
+            self.cur_vol = min(self.cur_vol, (self.volume / 100.0) * WELCOME_VOICE_DUCK)
+            t0 = time.time()
+            try:
+                while time.time() - t0 < dur + 2.0:
+                    with self._greet_lock:
+                        done = self._greet_buf is None
+                    if done:
+                        break
+                    time.sleep(0.05)
+            finally:
+                self.duck = 1.0
+            log("greet voice: поверх музыки, %.1f с" % dur)
+            return
+        path = self._greet_wav(text, pcm)
+        if not path:
+            return
+        self._stop_voice()
+        self._start_voice(path, 0)
+        time.sleep(dur + 0.4)
+        self._stop_voice()
+        log("greet voice: отдельным потоком, %.1f с" % dur)
+
     def _welcome_join(self, user):
         """При входе пользователя на сервер — приветствие с ником, городом и
         провайдером в канал TeamTalk (IP не показываем)."""
@@ -4085,6 +4276,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return  # исключение: сетевое приветствие этому не шлём
             ip = self._tt_field(user, "szIPAddress") or ""
             threading.Thread(target=self._welcome_do, args=(nick, ip), daemon=True).start()
+            self._greet_voice(nick)
         except Exception as e:
             log("welcome join err: %s" % str(e)[:150])
 
