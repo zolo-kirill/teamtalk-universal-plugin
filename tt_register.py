@@ -18,6 +18,8 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+
+import requests
 import uuid
 from datetime import datetime, timezone
 
@@ -49,6 +51,57 @@ CREATE_TIMEOUT_SEC = 10
 TG_PROXY = os.environ.get("TG_PROXY", "").strip()
 _TG_OPENER = None
 
+# Keep-alive: urllib открывает новое TLS-соединение на каждый запрос — через
+# прокси это ~0.5 с, а если маршрут залип, то 10-25 с. Держим пул соединений
+# на поток (requests.Session): после первого запроса задержка падает до
+# ~0.05-0.1 с, а залипший сокет выбрасывается и не тянет за собой следующие.
+_TL = threading.local()
+
+
+def _session():
+    s = getattr(_TL, "s", None)
+    if s is None:
+        s = requests.Session()
+        if TG_PROXY:
+            s.proxies = {"http": TG_PROXY, "https": TG_PROXY}
+        adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=8)
+        s.mount("https://", adapter)
+        s.mount("http://", adapter)
+        _TL.s = s
+    return s
+
+
+def _reset_session():
+    s = getattr(_TL, "s", None)
+    if s is not None:
+        try:
+            s.close()
+        except Exception:
+            pass
+        _TL.s = None
+
+
+class _Resp(object):
+    """Ответ requests в том виде, в каком его ждёт код: read() и with."""
+
+    __slots__ = ("_r",)
+
+    def __init__(self, r):
+        self._r = r
+
+    def read(self):
+        return self._r.content
+
+    def getcode(self):
+        return self._r.status_code
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._r.close()
+        return False
+
 
 def username_problem(name):
     """Проверяет логин и возвращает причину отказа либо None, если он годится."""
@@ -73,15 +126,24 @@ def safe_tt_filename(username):
 
 
 def _urlopen(req, timeout):
-    """urlopen: при заданном TG_PROXY запрос к Telegram API идёт через прокси."""
-    global _TG_OPENER
-    if TG_PROXY:
-        if _TG_OPENER is None:
-            _TG_OPENER = urllib.request.build_opener(
-                urllib.request.ProxyHandler({"http": TG_PROXY, "https": TG_PROXY})
-            )
-        return _TG_OPENER.open(req, timeout=timeout)
-    return urllib.request.urlopen(req, timeout=timeout)
+    """Запрос к Telegram API через keep-alive пул (и прокси, если он задан).
+
+    В отличие от urlopen, соединение переиспользуется: TLS-хендшейк платится
+    один раз на поток, а не на каждый вызов.
+    """
+    data = req.data
+    headers = dict(req.header_items())
+    headers.setdefault("Connection", "keep-alive")
+    for attempt in (1, 2):
+        try:
+            r = _session().request(req.get_method(), req.full_url, data=data,
+                                   headers=headers, timeout=timeout)
+            r.raise_for_status()
+            return _Resp(r)
+        except requests.RequestException:
+            _reset_session()
+            if attempt == 2:
+                raise
 
 
 # Права обычной (не администраторской) учётной записи, которую создаёт
@@ -345,7 +407,8 @@ class Registrar(object):
                     self.tg_q.put(upd)
             except Exception as e:
                 self.log("регистратор: poll err: %s" % str(e)[:200])
-                time.sleep(5)
+                _reset_session()
+                time.sleep(1)
 
     # -------------------------------------------------------------- TT events
     def _ensure_tt(self):
