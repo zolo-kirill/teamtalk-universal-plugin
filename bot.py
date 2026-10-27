@@ -4446,11 +4446,21 @@ class MusicBot(TeamTalk5.TeamTalk):
         path = self._greet_wav(text, pcm)
         if not path:
             return
-        self._stop_voice()
         self._start_voice(path, 0)
-        time.sleep(dur + 0.4)
-        self._stop_voice()
-        log("greet voice: отдельным потоком, %.1f с" % dur)
+        # Ждём фактического конца потока, а не таймер: ffmpeg стартует не
+        # мгновенно, и обрыв по времени (dur + 0.4) съедал хвост приветствия.
+        t0 = time.time()
+        deadline = t0 + dur + 8.0
+        while time.time() < deadline:
+            t = self.voice_thread
+            if not t or not t.is_alive():
+                break
+            time.sleep(0.1)
+        alive = bool(self.voice_thread and self.voice_thread.is_alive())
+        if alive:
+            self._stop_voice()  # страховка, если поток завис
+        log("greet voice: отдельным потоком, %.1f с (ждали %.1f с, обрыв=%s)"
+            % (dur, time.time() - t0, "да" if alive else "нет"))
 
     def _welcome_join(self, user):
         """При входе пользователя на сервер — приветствие с ником, городом и
