@@ -319,6 +319,16 @@ _CYR_LETTERS = {
 }
 
 
+def _pcm_min_bytes(text):
+    """Нижняя граница правдоподобной длины PCM: ~30 мс на символ."""
+    n = len("".join(str(text or "").split()))
+    return int(max(0.3, n * 0.03) * VOICE_RATE * VOICE_CHANNELS * 2)
+
+
+def _pcm_long_enough(text, data):
+    return bool(data) and len(data) >= _pcm_min_bytes(text)
+
+
 def _cyr_for_tts(text):
     """Транслитерировать латиницу в кириллицу для Silero.
 
@@ -4305,7 +4315,17 @@ class MusicBot(TeamTalk5.TeamTalk):
         if os.path.exists(raw) and os.path.getsize(raw) > 1000:
             try:
                 with open(raw, "rb") as f:
-                    return f.read()
+                    cached = f.read()
+                if _pcm_long_enough(text, cached):
+                    return cached
+                # Обрезанный кэш (след старой гонки .tmp): фраза звучала
+                # на секунду вместо десяти. Выбрасываем и синтезируем заново.
+                log("silero: кэш короткий (%d б на %d симв.) — пересинтез"
+                    % (len(cached), len(text)))
+                try:
+                    os.remove(raw)
+                except Exception:
+                    pass
             except Exception:
                 pass
         try:
@@ -4331,7 +4351,11 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return None
             with open(line[3:].strip(), "rb") as f:
                 data = f.read()
-            log("silero: синтез %d симв. -> %.1f с" % (len(text), len(data) / float(VOICE_RATE * 2 * VOICE_CHANNELS)))
+            secs = len(data) / float(VOICE_RATE * 2 * VOICE_CHANNELS)
+            log("silero: синтез %d симв. -> %.1f с" % (len(text), secs))
+            if not _pcm_long_enough(text, data):
+                log("silero: синтез подозрительно короткий (%d симв. -> %.1f с)"
+                    % (len(text), secs))
             return data
         except Exception as e:
             log("silero tts err: %s" % str(e)[:200])
@@ -4384,20 +4408,36 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("voice test err: %s" % str(e)[:150])
 
     def _greet_wav(self, text, pcm):
-        """WAV-файл приветствия (для случая, когда музыка не играет)."""
+        """WAV-файл приветствия (для случая, когда музыка не играет).
+
+        Пишем во временный файл и переименовываем: иначе два одновременных
+        приветствия перезаписывают файл, который ffmpeg сейчас читает, и
+        фраза обрывается на середине.
+        """
         import wave
-        key = hashlib.sha1(("%s|%s|%s" % (WELCOME_VOICE_SPEAKER, VOICE_RATE, text)).encode("utf-8")).hexdigest()[:16]
+        key = hashlib.sha1(("%s|%s|%s|%s" % (WELCOME_VOICE_SPEAKER, WELCOME_EN_SPEAKER,
+                                            VOICE_RATE, text)).encode("utf-8")).hexdigest()[:16]
         path = os.path.join(CACHE_DIR, "greet_%s.wav" % key)
-        if os.path.exists(path) and os.path.getsize(path) > 1000:
-            return path
+        want = 44 + len(pcm)
         try:
-            with wave.open(path, "wb") as w:
+            if os.path.exists(path) and os.path.getsize(path) == want:
+                return path
+        except Exception:
+            pass
+        tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+        try:
+            with wave.open(tmp, "wb") as w:
                 w.setnchannels(VOICE_CHANNELS)
                 w.setsampwidth(2)
                 w.setframerate(VOICE_RATE)
                 w.writeframes(pcm)
+            os.replace(tmp, path)
             return path
         except Exception as e:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
             log("greet wav err: %s" % str(e)[:120])
             return None
 
@@ -4453,24 +4493,24 @@ class MusicBot(TeamTalk5.TeamTalk):
                         self._greet_pos = 0
             log("greet voice: поверх музыки, %.1f с" % dur)
             return
-        path = self._greet_wav(text, pcm)
-        if not path:
-            return
+        # Замок берём ДО записи WAV: иначе повторный вход успевает
+        # перезаписать файл, который читает ffmpeg, и фраза обрывается.
         if not self._speak_lock.acquire(blocking=False):
             log("greet voice: уже звучит другая озвучка — пропускаю")
             return
         try:
+            path = self._greet_wav(text, pcm)
+            if not path:
+                return
             self._start_voice(path, 0)
-            # Ждём фактического конца потока, а не таймер: ffmpeg стартует не
-            # мгновенно, и обрыв по времени (dur + 0.4) съедал хвост.
+            my_thread = self.voice_thread  # свой поток: чужая остановка не собьёт ожидание
             t0 = time.time()
             deadline = t0 + dur + 8.0
             while time.time() < deadline:
-                t = self.voice_thread
-                if not t or not t.is_alive():
+                if not my_thread or not my_thread.is_alive():
                     break
                 time.sleep(0.1)
-            alive = bool(self.voice_thread and self.voice_thread.is_alive())
+            alive = bool(my_thread and my_thread.is_alive())
             if alive:
                 self._stop_voice()  # страховка, если поток завис
             log("greet voice: отдельным потоком, %.1f с (ждали %.1f с, обрыв=%s)"
