@@ -397,6 +397,16 @@ WELCOME_VOICE_ENABLED = bool(_cfg("welcome.voice_enabled", None, True))
 WELCOME_VOICE_TEXT = str(_cfg("welcome.voice_text", None,
     "Привет, {nick}! Добро пожаловать на сервер {server}.") or "").strip()
 WELCOME_VOICE_SPEAKER = str(_cfg("welcome.voice_speaker", None, "baya") or "baya").strip()
+
+# Голоса Silero v4_ru, доступные для выбора из Telegram
+WELCOME_VOICES = ("baya", "kseniya", "xenia", "eugene", "aidar")
+WELCOME_VOICE_LABELS = {
+    "baya": "Бая (жен)",
+    "kseniya": "Ксения (жен)",
+    "xenia": "Ксения-2 (жен)",
+    "eugene": "Евгений (муж)",
+    "aidar": "Айдар (муж)",
+}
 WELCOME_VOICE_DUCK = float(_cfg("welcome.voice_duck", None, 0.15) or 0.15)
 try:
     # 0 — приветствовать каждый вход; «or 0» нужен, чтобы 0 не превращался в 900
@@ -1093,6 +1103,16 @@ class MusicBot(TeamTalk5.TeamTalk):
                 ptext, pkb = self._player_view()
                 self._tg_send_kb(cid, ptext, pkb)
                 return
+            if low in ("/voice", "/голос", "voice", "голос") or low.startswith(("/voice ", "/голос ")):
+                arg = text.split(" ", 1)[1].strip().lower() if " " in text else ""
+                if arg:
+                    if self._set_welcome_voice(arg):
+                        self._tg_send_text(cid, "Голос приветствия: %s" % WELCOME_VOICE_LABELS.get(arg, arg))
+                    else:
+                        self._tg_send_text(cid, "Такого голоса нет. Доступно: %s." % ", ".join(WELCOME_VOICES))
+                vtext, vkb = self._voice_view()
+                self._tg_send_kb(cid, vtext, vkb)
+                return
             if low in ("/subs", "subs"):
                 text, kb = self._subs_list_view()
                 self._tg_send_kb(cid, text, kb)
@@ -1560,6 +1580,23 @@ class MusicBot(TeamTalk5.TeamTalk):
         if data.startswith("player:"):
             self._player_cb(cq, data)
             return
+        if data.startswith("voice:set:"):
+            name = data.split(":", 2)[2]
+            ok = self._set_welcome_voice(name)
+            self._tg_answer_cb(qid, ("Голос: %s" % WELCOME_VOICE_LABELS.get(name, name)) if ok
+                               else "Неизвестный голос.")
+            text, kb = self._voice_view()
+            self._tg_edit_kb(cid, mid, text, kb)
+            return
+        if data == "voice:list":
+            self._tg_answer_cb(qid)
+            text, kb = self._voice_view()
+            self._tg_edit_kb(cid, mid, text, kb)
+            return
+        if data == "voice:test":
+            self._tg_answer_cb(qid, "Синтезирую и включаю в канале")
+            threading.Thread(target=self._voice_test_worker, daemon=True).start()
+            return
         if data == "subs:list":
             self._tg_answer_cb(qid)
             text, kb = self._subs_list_view()
@@ -1834,6 +1871,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             {"command": "unban", "description": "Разблокировать: /unban"},
             {"command": "net", "description": "Сетевое сообщение всем: /net <текст>"},
             {"command": "panel", "description": "Пульт: пауза, трек, громкость"},
+            {"command": "voice", "description": "Голос приветствия: выбор или /voice <имя>"},
         ]
         try:
             # общее меню по умолчанию — без админских команд
@@ -4192,6 +4230,52 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception as e:
             log("silero tts err: %s" % str(e)[:200])
             return None
+
+    # ---- голос приветствия: выбор из Telegram ----
+
+    def _voice_view(self):
+        """Текст и кнопки для выбора голоса приветствия."""
+        cur = globals().get("WELCOME_VOICE_SPEAKER", "baya")
+        lines = ["\U0001f5e3 Голос приветствия", "",
+                 "Сейчас: %s" % WELCOME_VOICE_LABELS.get(cur, cur), "",
+                 "Нажмите голос — применится сразу, перезапуск не нужен.",
+                 "Слышно только тем, кто рядом с ботом в канале."]
+        kb, row = [], []
+        for name in WELCOME_VOICES:
+            mark = "\u2705 " if name == cur else ""
+            row.append({"text": mark + WELCOME_VOICE_LABELS.get(name, name),
+                        "callback_data": "voice:set:%s" % name})
+            if len(row) == 2:
+                kb.append(row)
+                row = []
+        if row:
+            kb.append(row)
+        kb.append([{"text": "\U0001f50a Проверить голос", "callback_data": "voice:test"},
+                   {"text": "\U0001f504 Обновить", "callback_data": "voice:list"}])
+        return "\n".join(lines), kb
+
+    def _set_welcome_voice(self, name):
+        """Сменить голос приветствия: config.json + сразу в работу."""
+        name = (name or "").strip().lower()
+        if name not in WELCOME_VOICES:
+            return False
+        try:
+            _save_config({"welcome": {"voice_speaker": name}})
+        except Exception as e:
+            log("voice save err: %s" % str(e)[:150])
+            return False
+        globals()["WELCOME_VOICE_SPEAKER"] = name
+        log("welcome voice -> %s" % name)
+        return True
+
+    def _voice_test_worker(self):
+        """Озвучить приветствие текущим голосом прямо в канал."""
+        try:
+            text = (WELCOME_VOICE_TEXT or "Привет, {nick}! Добро пожаловать на сервер {server}.").format(
+                nick="Кирилл", server=self._server_name() or "сервер")
+            self._greet_voice_worker(text)
+        except Exception as e:
+            log("voice test err: %s" % str(e)[:150])
 
     def _greet_wav(self, text, pcm):
         """WAV-файл приветствия (для случая, когда музыка не играет)."""
