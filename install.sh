@@ -635,6 +635,22 @@ do_install() {
 
     # --- 5. SDK ---
     say ""
+    # Голосовое приветствие: Silero TTS считает локально на CPU (нужен torch)
+    if "$PY" -c "import torch" >/dev/null 2>&1; then
+        say "  Silero TTS: torch уже стоит"
+    else
+        local VOICE_ANS="n"
+        ask_yn VOICE_ANS "  Поставить голосовое приветствие (Silero TTS, ~200 МБ)" y
+        if [ "$VOICE_ANS" = "y" ]; then
+            say "  Ставлю torch (CPU) и numpy..."
+            if run "$PY" -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch numpy; then
+                say "  Silero TTS: готово, голос задаётся в welcome.voice_speaker"
+            else
+                say "  !! torch не установился — голосовое приветствие будет молчать."
+            fi
+        fi
+    fi
+
     say "== 5/7 TeamTalk SDK =="
     local SDK_LIB="" SDK_DIR="" BUNDLED=""
     BUNDLED="$(ls -d "$REPO_DIR"/sdk/tt5sdk*/Library/TeamTalk_DLL/libTeamTalk5.so 2>/dev/null | head -1 || true)"
@@ -745,6 +761,14 @@ do_install() {
         run systemctl --user enable "$UNIT_NAME"
         say "  Запускаю бота..."
         run systemctl --user start "$UNIT_NAME"
+        # Воркер синтеза речи: отдельный процесс, потому что torch в одном
+        # процессе с TeamTalk SDK падает в segfault (проверено на практике).
+        if [ -f "$REPO_DIR/tt-plugin-tts.service" ] && "$REPO_DIR/.venv/bin/python" -c "import torch" >/dev/null 2>&1; then
+            sed -e "s|__DIR__|$REPO_DIR|g" "$REPO_DIR/tt-plugin-tts.service" > "$UNIT_DIR/tt-plugin-tts.service"
+            run systemctl --user daemon-reload
+            run systemctl --user enable --now tt-plugin-tts.service
+            say "  Голосовое приветствие: воркер синтеза (tt-plugin-tts) запущен"
+        fi
         if command -v loginctl >/dev/null 2>&1; then
             run sudo loginctl enable-linger "$(id -un)" || say "  (не удалось включить linger — после перезагрузки сервис запустится только после входа в систему)"
         fi
