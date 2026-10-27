@@ -135,5 +135,10 @@
   },
   "music": {
     "voice_announce": true
+  },
+  "startup": {
+    "resume_last": false,
+    "url": "",
+    "volume": 0
   }
 }

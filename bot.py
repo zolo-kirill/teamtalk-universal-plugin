@@ -380,6 +380,14 @@ PASSWORD = str(_cfg("server.password", "TEAMTALK_PASSWORD", ""))
 CHANNEL = str(_cfg("server.channel", "TEAMTALK_CHANNEL", ""))  # empty = root channel
 CHANNEL_PASSWORD = str(_cfg("server.channel_password", "TEAMTALK_CHANNEL_PASSWORD", ""))
 DEFAULT_VOLUME = int(_cfg("playback.default_volume", None, 10))
+# Стартовое воспроизведение: что играть при запуске бота и с какой громкостью.
+# resume_last=False — больше не возвращаем последнюю ссылку после перезапуска.
+STARTUP_RESUME_LAST = bool(_cfg("startup.resume_last", None, False))
+STARTUP_URL = str(_cfg("startup.url", None, "") or "").strip()
+try:
+    STARTUP_VOLUME = int(_cfg("startup.volume", None, 0) or 0)
+except (TypeError, ValueError):
+    STARTUP_VOLUME = 0
 MAX_VOLUME = int(_cfg("playback.max_volume", None, 100))
 DEFAULT_SERVICE = str(_cfg("runtime.main_service", None, "yt"))
 DEFAULT_CHANNEL_MSG = bool(_cfg("runtime.send_to_channel", None, True))
@@ -3185,6 +3193,37 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception as e:
             log("resume thread err: %s" % e)
 
+    def _run_startup_playback(self):
+        """Что играть при старте бота.
+
+        Настройки в config.json:
+          startup.volume       1..100 — громкость сразу после входа в канал
+          startup.url          ссылка, которая заиграет при запуске
+          startup.resume_last  true — вернуть прежнее поведение: продолжать
+                               то, что играло до перезапуска (по умолчанию выкл.)
+        """
+        time.sleep(3)
+        try:
+            if STARTUP_VOLUME > 0:
+                v = max(1, min(MAX_VOLUME, STARTUP_VOLUME))
+                self.volume = v
+                self.cur_vol = v / 100.0
+                log("startup volume: %d%%" % v)
+            if STARTUP_RESUME_LAST:
+                self._resume_last()
+                return
+            if not STARTUP_URL:
+                log("startup url: не задана — тишина")
+                return
+            url = STARTUP_URL
+            log("startup url: %s" % url)
+            if self._is_live_stream(url):
+                self._play_radio(url, url)
+            else:
+                self._play_file(url, url, url)
+        except Exception as e:
+            log("startup playback err: %s" % str(e)[:150])
+
     def _mow_cmd(self):
         """Моя волна — персональный поток Яндекс.Музыки."""
         if not YM_TOKEN:
@@ -3776,7 +3815,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 log("joined channel id %d" % self.my_channel_id)
                 if not getattr(self, "_resume_started", False):
                     self._resume_started = True
-                    threading.Thread(target=self._run_resume_last, daemon=True).start()
+                    threading.Thread(target=self._run_startup_playback, daemon=True).start()
         except Exception:
             pass
 
