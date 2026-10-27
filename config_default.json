@@ -1,93 +1,134 @@
 {
-    "version": 1,
-    "server": {
-        "host": "",
-        "tcp_port": 10333,
-        "udp_port": 10333,
-        "nickname": "!universal bot",
-        "username": "",
-        "password": "",
-        "channel": "",
-        "channel_password": "",
-        "connect_timeout_sec": 20
+  "version": 1,
+  "server": {
+    "host": "",
+    "tcp_port": 10333,
+    "udp_port": 10333,
+    "nickname": "!universal bot",
+    "username": "",
+    "password": "",
+    "channel": "",
+    "channel_password": "",
+    "connect_timeout_sec": 20
+  },
+  "playback": {
+    "default_volume": 10,
+    "max_volume": 100,
+    "pulse_sink": ""
+  },
+  "runtime": {
+    "main_service": "yt",
+    "send_to_channel": true,
+    "startup_commands": [],
+    "yt_js_runtime": "",
+    "yt_po_token_extractor": "",
+    "playlist_limit": 5000
+  },
+  "services": {
+    "yt": {
+      "cookiefile_path": ""
     },
-    "playback": {
-        "default_volume": 10,
-        "max_volume": 100,
-        "pulse_sink": ""
+    "rt": {
+      "cookiefile_path": ""
     },
-    "runtime": {
-        "main_service": "yt",
-        "send_to_channel": true,
-        "startup_commands": [],
-        "yt_js_runtime": "",
-        "yt_po_token_extractor": "",
-        "playlist_limit": 5000
-    },
-    "services": {
-        "yt": {
-            "cookiefile_path": ""
-        },
-        "rt": {
-            "cookiefile_path": ""
-        },
-        "ym": {
-            "token": ""
-        }
-    },
-    "telegram": {
-        "token": "",
-        "owner_user_id": 0,
-        "notify_chat_id": 0,
-        "server_display_name": "",
-        "ignore_usernames": [],
-        "ignore_nicks": [],
-        "music_token": ""
-    },
-    "welcome": {
-        "rules_text": ""
-    },
-    "registration": {
-        "enabled": false,
-        "token": "",
-        "notify_user_ids": [],
-        "broadcast_text": "Пользователь {username} зарегистрирован на сервере",
-        "admin_username": "bot_admin",
-        "admin_password": "",
-        "admin_nickname": "регистратор",
-        "user_rights": 0
-    },
-    "account_watch": {
-        "enabled": true,
-        "interval_sec": 10,
-        "notify_owner": true
-    },
-    "guard": {
-        "enabled": true,
-        "guest_logins": ["1"],
-        "notify": true,
-        "geo": {
-            "enabled": false,
-            "allow_countries": ["RU"],
-            "ranges_file": "geo/ru_ipv4.txt"
-        },
-        "botnet_nick_check": true,
-        "kick_empty_nick": true,
-        "kick_empty_nick_all": true,
-        "kick_empty_nick_ban": true,
-        "max_nick_len": 40,
-        "mat_check": true,
-        "mat_words": ["пизд", "хуй", "хуе", "хуя", "бля", "еба", "ебл", "ебн", "ебок", "заеб", "наеб", "поеб", "говн", "гандон", "залуп", "шлюх", "дроч", "манд", "мудак", "мудач", "пидор", "пидр", "сука", "суки", "суку", "херн", "херо"],
-        "burst_enabled": true,
-        "burst": {
-            "window_sec": 30,
-            "threshold": 20,
-            "cooldown_sec": 300
-        },
-        "trusted": {
-            "usernames": [],
-            "nicknames": [],
-            "ip_prefixes": ["127.0.0.", "10.", "192.168."]
-        }
+    "ym": {
+      "token": ""
     }
+  },
+  "telegram": {
+    "token": "",
+    "owner_user_id": 0,
+    "notify_chat_id": 0,
+    "server_display_name": "",
+    "ignore_usernames": [],
+    "ignore_nicks": [],
+    "music_token": ""
+  },
+  "welcome": {
+    "rules_text": "",
+    "voice_enabled": true,
+    "voice_text": "Привет, {nick}! Добро пожаловать на сервер {server}.",
+    "voice_speaker": "baya",
+    "voice_duck": 0.15,
+    "voice_cooldown": 900
+  },
+  "registration": {
+    "enabled": false,
+    "token": "",
+    "notify_user_ids": [],
+    "broadcast_text": "Пользователь {username} зарегистрирован на сервере",
+    "admin_username": "bot_admin",
+    "admin_password": "",
+    "admin_nickname": "регистратор",
+    "user_rights": 0
+  },
+  "account_watch": {
+    "enabled": true,
+    "interval_sec": 10,
+    "notify_owner": true
+  },
+  "guard": {
+    "enabled": true,
+    "guest_logins": [
+      "1"
+    ],
+    "notify": true,
+    "geo": {
+      "enabled": false,
+      "allow_countries": [
+        "RU"
+      ],
+      "ranges_file": "geo/ru_ipv4.txt"
+    },
+    "botnet_nick_check": true,
+    "kick_empty_nick": true,
+    "kick_empty_nick_all": true,
+    "kick_empty_nick_ban": true,
+    "max_nick_len": 40,
+    "mat_check": true,
+    "mat_words": [
+      "пизд",
+      "хуй",
+      "хуе",
+      "хуя",
+      "бля",
+      "еба",
+      "ебл",
+      "ебн",
+      "ебок",
+      "заеб",
+      "наеб",
+      "поеб",
+      "говн",
+      "гандон",
+      "залуп",
+      "шлюх",
+      "дроч",
+      "манд",
+      "мудак",
+      "мудач",
+      "пидор",
+      "пидр",
+      "сука",
+      "суки",
+      "суку",
+      "херн",
+      "херо"
+    ],
+    "burst_enabled": true,
+    "burst": {
+      "window_sec": 30,
+      "threshold": 20,
+      "cooldown_sec": 300
+    },
+    "trusted": {
+      "usernames": [],
+      "nicknames": [],
+      "ip_prefixes": [
+        "127.0.0.",
+        "10.",
+        "192.168."
+      ]
+    }
+  }
 }
