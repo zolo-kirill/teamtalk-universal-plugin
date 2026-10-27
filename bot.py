@@ -398,7 +398,11 @@ WELCOME_VOICE_TEXT = str(_cfg("welcome.voice_text", None,
     "Привет, {nick}! Добро пожаловать на сервер {server}.") or "").strip()
 WELCOME_VOICE_SPEAKER = str(_cfg("welcome.voice_speaker", None, "baya") or "baya").strip()
 WELCOME_VOICE_DUCK = float(_cfg("welcome.voice_duck", None, 0.15) or 0.15)
-WELCOME_VOICE_COOLDOWN = int(_cfg("welcome.voice_cooldown", None, 900) or 900)
+try:
+    # 0 — приветствовать каждый вход; «or 0» нужен, чтобы 0 не превращался в 900
+    WELCOME_VOICE_COOLDOWN = max(0, int(_cfg("welcome.voice_cooldown", None, 900) or 0))
+except (TypeError, ValueError):
+    WELCOME_VOICE_COOLDOWN = 900
 SILERO_MODEL_ID = str(_cfg("welcome.silero_model", None, "v4_ru") or "v4_ru")
 TTS_SOCK = str(_cfg("welcome.tts_socket", None, "") or os.path.join(CACHE_DIR, "tts.sock"))
 _SILERO_LOCK = threading.Lock()
