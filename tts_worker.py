@@ -155,10 +155,20 @@ def synth(text, speaker, en_speaker=None):
             buf.append(gap)
         buf.append(_tts_pcm(models[lang], lang, chunk.strip(), speaker, en_speaker))
     data = b"".join(buf)
-    tmp = raw + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(data)
-    os.replace(tmp, raw)
+    tmp = "%s.%d.%d.tmp" % (raw, os.getpid(), threading.get_ident())
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, raw)
+    except Exception:
+        # Тот же текст мог синтезироваться параллельно: файл уже на месте.
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except Exception:
+            pass
+        if not (os.path.exists(raw) and os.path.getsize(raw) > 1000):
+            raise
     dur = len(data) / float(RATE * CHANNELS * 2)
     print("tts worker: синтез %d симв. -> %.1f с (%s)" % (
         len(text), dur, "+".join("%s:%s" % (l, c.strip()[:20]) for l, c in segs)), flush=True)

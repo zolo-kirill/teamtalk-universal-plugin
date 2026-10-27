@@ -711,6 +711,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.duck = 1.0  # множитель приглушения (голосовое приветствие)
         self._greet_buf = None  # PCM приветствия, подмешивается в поток
         self._greet_pos = 0
+        self._speak_lock = threading.Lock()  # одна озвучка за раз, чтобы не рвать фразу
         self._greet_lock = threading.Lock()
         self._greet_seen = {}
         self._greet_seen_lock = threading.Lock()
@@ -4427,6 +4428,9 @@ class MusicBot(TeamTalk5.TeamTalk):
         music = bool(self.playing and not self.paused)
         if music:
             with self._greet_lock:
+                if self._greet_buf is not None:
+                    log("greet voice: уже звучит голос — пропускаю")
+                    return
                 self._greet_buf = pcm
                 self._greet_pos = 0
             self.duck = WELCOME_VOICE_DUCK
@@ -4441,26 +4445,38 @@ class MusicBot(TeamTalk5.TeamTalk):
                     time.sleep(0.05)
             finally:
                 self.duck = 1.0
+                # Музыка могла кончиться посреди фразы — остаток буфера
+                # иначе подмешался бы в следующий трек.
+                with self._greet_lock:
+                    if self._greet_buf is not None:
+                        self._greet_buf = None
+                        self._greet_pos = 0
             log("greet voice: поверх музыки, %.1f с" % dur)
             return
         path = self._greet_wav(text, pcm)
         if not path:
             return
-        self._start_voice(path, 0)
-        # Ждём фактического конца потока, а не таймер: ffmpeg стартует не
-        # мгновенно, и обрыв по времени (dur + 0.4) съедал хвост приветствия.
-        t0 = time.time()
-        deadline = t0 + dur + 8.0
-        while time.time() < deadline:
-            t = self.voice_thread
-            if not t or not t.is_alive():
-                break
-            time.sleep(0.1)
-        alive = bool(self.voice_thread and self.voice_thread.is_alive())
-        if alive:
-            self._stop_voice()  # страховка, если поток завис
-        log("greet voice: отдельным потоком, %.1f с (ждали %.1f с, обрыв=%s)"
-            % (dur, time.time() - t0, "да" if alive else "нет"))
+        if not self._speak_lock.acquire(blocking=False):
+            log("greet voice: уже звучит другая озвучка — пропускаю")
+            return
+        try:
+            self._start_voice(path, 0)
+            # Ждём фактического конца потока, а не таймер: ffmpeg стартует не
+            # мгновенно, и обрыв по времени (dur + 0.4) съедал хвост.
+            t0 = time.time()
+            deadline = t0 + dur + 8.0
+            while time.time() < deadline:
+                t = self.voice_thread
+                if not t or not t.is_alive():
+                    break
+                time.sleep(0.1)
+            alive = bool(self.voice_thread and self.voice_thread.is_alive())
+            if alive:
+                self._stop_voice()  # страховка, если поток завис
+            log("greet voice: отдельным потоком, %.1f с (ждали %.1f с, обрыв=%s)"
+                % (dur, time.time() - t0, "да" if alive else "нет"))
+        finally:
+            self._speak_lock.release()
 
     def _welcome_join(self, user):
         """При входе пользователя на сервер — приветствие с ником, городом и
