@@ -1064,6 +1064,10 @@ class MusicBot(TeamTalk5.TeamTalk):
             if low.startswith("/unadmin ") or low == "/unadmin":
                 self._tg_unadmin_cmd(msg, text)
                 return
+            if low in ("/panel", "/пульт", "panel", "пульт"):
+                ptext, pkb = self._player_view()
+                self._tg_send_kb(cid, ptext, pkb)
+                return
             if low in ("/subs", "subs"):
                 text, kb = self._subs_list_view()
                 self._tg_send_kb(cid, text, kb)
@@ -1368,6 +1372,100 @@ class MusicBot(TeamTalk5.TeamTalk):
             kb.append([{"text": label, "callback_data": "%s:do:%s" % (mode, uid)}])
         return "\n".join(lines), kb
 
+    # ---- пульт воспроизведения (inline-кнопки) ----
+
+    def _player_state_line(self):
+        if self.paused and self.playing:
+            return "⏸ Пауза"
+        if self.playing:
+            return "▶️ Играет"
+        return "⏹ Остановлено"
+
+    def _player_view(self):
+        """Текст и кнопки пульта: состояние, трек, громкость, очередь."""
+        lines = ["🎛 Пульт — %s" % self._player_state_line()]
+        if self.current:
+            lines.append("Трек: %s" % str(self.current[1])[:90])
+            pos = self.cur_offset_ms if self.paused else self._elapsed_ms()
+            lines.append("Позиция: %s" % _fmt_ms(pos))
+        elif self.cur_source:
+            lines.append("Поток: %s" % str(self.cur_source[1])[:90])
+        else:
+            lines.append("Трек: —")
+        lines.append("Громкость: %d%%" % self.volume)
+        lines.append("В очереди: %d" % len(self.queue))
+        row1 = []
+        if self.paused and self.playing:
+            row1.append({"text": "▶️ Продолжить", "callback_data": "player:resume"})
+        else:
+            row1.append({"text": "⏸ Пауза", "callback_data": "player:pause"})
+        row1.append({"text": "⏭ Следующий", "callback_data": "player:next"})
+        row1.append({"text": "⏹ Стоп", "callback_data": "player:stop"})
+        row2 = [{"text": "🔉 −10", "callback_data": "player:vol:-"},
+                {"text": "🔊 +10", "callback_data": "player:vol:+"},
+                {"text": "📋 Очередь", "callback_data": "player:queue"}]
+        row3 = [{"text": "🔄 Обновить", "callback_data": "player:refresh"},
+                {"text": "👥 Онлайн", "callback_data": "online:list"}]
+        return "\n".join(lines), [row1, row2, row3]
+
+    def _stop_all_playback(self):
+        """Полная остановка: звук, очередь, статус бота."""
+        self._stop_voice()
+        self.playing = False
+        self.paused = False
+        self.current = None
+        self.current_orig = None
+        self.cur_source = None
+        self.cur_offset_ms = 0
+        self.voice_offset_base = 0
+        self.voice_started_at = 0
+        self.queue.clear()
+        self._set_status(self.status_msg)
+
+    def _player_cb(self, cq, data):
+        """Нажатие кнопки пульта: выполняем действие и перерисовываем панель."""
+        qid = cq.get("id")
+        cid = (cq.get("message") or {}).get("chat", {}).get("id")
+        mid = (cq.get("message") or {}).get("message_id")
+        act = data.split(":", 1)[1] if ":" in data else ""
+        try:
+            if act == "pause":
+                if not self.playing or self.paused:
+                    self._tg_answer_cb(qid, "Сейчас нечего ставить на паузу.")
+                else:
+                    self._pause()
+                    self._tg_answer_cb(qid, "Пауза.")
+            elif act == "resume":
+                if not (self.playing and self.paused):
+                    self._tg_answer_cb(qid, "Паузы нет.")
+                else:
+                    self._resume()
+                    self._tg_answer_cb(qid, "Продолжаю.")
+            elif act == "next":
+                self._advance()
+                self._tg_answer_cb(qid, "Следующий трек.")
+            elif act == "stop":
+                self._stop_all_playback()
+                self._tg_answer_cb(qid, "Остановлено.")
+            elif act.startswith("vol:"):
+                step = 10 if act.endswith("+") else -10
+                self._set_volume(self.volume + step)
+                self._tg_answer_cb(qid, "Громкость %d%%" % self.volume)
+            elif act == "queue":
+                self._tg_answer_cb(qid, "В очереди: %d" % len(self.queue))
+            elif act == "refresh":
+                self._tg_answer_cb(qid, "Обновлено.")
+            else:
+                self._tg_answer_cb(qid)
+        except Exception as e:
+            log("player cb err: %s" % str(e)[:120])
+            self._tg_answer_cb(qid, "Ошибка: действие не выполнено.", alert=True)
+        try:
+            text, kb = self._player_view()
+            self._tg_edit_kb(cid, mid, text, kb)
+        except Exception as e:
+            log("player panel edit err: %s" % str(e)[:120])
+
     def _online_view(self):
         """Кто на сервере — кнопки по пользователям (кроме бота). Нажатие открывает действия."""
         users = []
@@ -1431,6 +1529,10 @@ class MusicBot(TeamTalk5.TeamTalk):
         mid = (cq.get("message") or {}).get("message_id")
         if not self._tg_cb_allowed(cq):
             self._tg_answer_cb(qid, "Нет доступа.", alert=True)
+            return
+
+        if data.startswith("player:"):
+            self._player_cb(cq, data)
             return
         if data == "subs:list":
             self._tg_answer_cb(qid)
@@ -1705,6 +1807,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             {"command": "ban", "description": "Заблокировать пользователя"},
             {"command": "unban", "description": "Разблокировать: /unban"},
             {"command": "net", "description": "Сетевое сообщение всем: /net <текст>"},
+            {"command": "panel", "description": "Пульт: пауза, трек, громкость"},
         ]
         try:
             # общее меню по умолчанию — без админских команд
