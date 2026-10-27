@@ -50,7 +50,9 @@
     "voice_text": "Привет, {nick}! Рады видеть тебя на сервере {server}. Устраивайся поудобнее, заходи в каналы, включай музыку и общайся. Если нужна помощь — просто позови.",
     "voice_speaker": "baya",
     "voice_duck": 0.15,
-    "voice_cooldown": 0
+    "voice_cooldown": 0,
+    "voice_bilingual": true,
+    "voice_en_speaker": "en_21"
   },
   "registration": {
     "enabled": false,

@@ -439,6 +439,12 @@ WELCOME_VOICE_TEXT = str(_cfg("welcome.voice_text", None,
     "Привет, {nick}! Добро пожаловать на сервер {server}.") or "").strip()
 WELCOME_VOICE_SPEAKER = str(_cfg("welcome.voice_speaker", None, "baya") or "baya").strip()
 
+# Двуязычная озвучка: латиницу читает английская модель (v3_en),
+# кириллицу — русская (v4_ru). welcome.voice_bilingual=false возвращает
+# старую транслитерацию в кириллицу.
+WELCOME_VOICE_BILINGUAL = bool(_cfg("welcome.voice_bilingual", None, True))
+WELCOME_EN_SPEAKER = str(_cfg("welcome.voice_en_speaker", None, "en_21") or "en_21").strip()
+
 # Голоса Silero v4_ru, доступные для выбора из Telegram
 WELCOME_VOICES = ("baya", "kseniya", "xenia", "eugene", "aidar")
 WELCOME_VOICE_LABELS = {
@@ -4288,9 +4294,12 @@ class MusicBot(TeamTalk5.TeamTalk):
         """
         if not text:
             return None
-        # Silero не читает латиницу — переводим её в кириллицу
-        text = _cyr_for_tts(text)
-        key = hashlib.sha1(("%s|%s" % (WELCOME_VOICE_SPEAKER, text)).encode("utf-8")).hexdigest()[:16]
+        # Латиницу читает английская модель, кириллицу — русская:
+        # делением занимается воркер (tts_worker.py). Если двуязычный
+        # режим выключен — старая транслитерация в кириллицу.
+        if not WELCOME_VOICE_BILINGUAL:
+            text = _cyr_for_tts(text)
+        key = hashlib.sha1(("%s|%s|%s" % (WELCOME_VOICE_SPEAKER, WELCOME_EN_SPEAKER, text)).encode("utf-8")).hexdigest()[:16]
         raw = os.path.join(CACHE_DIR, "greet_%s.raw" % key)
         if os.path.exists(raw) and os.path.getsize(raw) > 1000:
             try:
@@ -4299,8 +4308,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             except Exception:
                 pass
         try:
-            payload = "TEXT\t%s\t%s\n" % (
+            payload = "TEXT\t%s\t%s\t%s\n" % (
                 WELCOME_VOICE_SPEAKER,
+                WELCOME_EN_SPEAKER,
                 base64.b64encode(text.encode("utf-8")).decode("ascii"),
             )
             sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
