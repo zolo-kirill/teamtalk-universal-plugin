@@ -31,3 +31,12 @@ hometun/client/config.txt
 *.ppk
 tun_key
 tun_key.pub
+
+# Состояние бота: локальные данные конкретного сервера
+users.db
+bans.json
+favorites.json
+.statusmsg
+.voice_announce
+.ytdlp_update
+*.bak-*
