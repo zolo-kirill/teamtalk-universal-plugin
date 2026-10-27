@@ -395,6 +395,119 @@ setup_telegram_proxy() {
 }
 
 # ---------------------------------------------------------------- установка
+# ---------------------------------------------------------------- TeamTalk SDK
+# Скрипт старается взять самый свежий SDK с bearware.dk, но только тот, который
+# реально грузится на этой системе: свежие сборки собираются под новый glibc и
+# на старых Ubuntu падают. Если скачать нечего или сборка не грузится —
+# остаётся SDK из репозитория, он рабочий.
+
+# sdk_host_glibc — версия glibc хоста, например 2.39
+sdk_host_glibc() {
+    ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1
+}
+
+# версия a не больше b
+sdk_ver_le() {
+    [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]
+}
+
+# sdk_ubuntu_glibc 26 → 2.43 — минимум glibc для сборки под эту Ubuntu
+sdk_ubuntu_glibc() {
+    case "$1" in
+        18) printf '2.27' ;;
+        20) printf '2.31' ;;
+        22) printf '2.35' ;;
+        24) printf '2.39' ;;
+        25) printf '2.41' ;;
+        26) printf '2.43' ;;
+        *)  printf '0' ;;
+    esac
+}
+
+# sdk_candidates — печатает "ubuntu url" подходящих сборок: свежие версии первыми
+sdk_candidates() {
+    curl -fsSL -m 25 "https://bearware.dk/?page_id=419" 2>/dev/null \
+      | grep -oE 'https?://[^"[:space:]]*tt5sdk_v[0-9][^"[:space:]]*_ubuntu[0-9]+_x86_64\.7z' \
+      | sed -e 's#^http://#https://#' -e 's#^https://www\.#https://#' \
+      | sed -E 's#^(https://[^ ]*/tt5sdk_v([0-9]+(\.[0-9]+)*[a-z]?)_ubuntu([0-9]+)_x86_64\.7z)$#\4 \1#' \
+      | sort -u \
+      | sort -k1,1nr
+}
+
+# sdk_test_load DIR PYTHON — грузится ли TeamTalk5 из этого каталога
+sdk_log() { printf '%s\n' "$*" >&2; }
+
+sdk_test_load() {
+    local dir="$1" py="$2" bin=""
+    local lib="$dir/Library/TeamTalk_DLL/libTeamTalk5.so"
+    [ -f "$lib" ] || return 1
+    case "$py" in
+        "")  return 0 ;;
+        */*) [ -x "$py" ] && bin="$py" ;;
+        *)   bin="$(command -v "$py" 2>/dev/null || true)" ;;
+    esac
+    # если интерпретатор из .venv не создан (или его снесли) — проверяем системным
+    [ -n "$bin" ] || bin="$(command -v python3 2>/dev/null || true)"
+    [ -n "$bin" ] || return 1
+    # 1) библиотека должна реально загружаться: ловит несовместимый glibc
+    ( LD_LIBRARY_PATH="$dir/Library/TeamTalk_DLL" \
+      "$bin" -c 'import ctypes,sys; ctypes.CDLL(sys.argv[1])' "$lib" ) >/dev/null 2>&1 || return 1
+    # 2) и питоновский модуль поверх неё должен импортироваться
+    ( LD_LIBRARY_PATH="$dir/Library/TeamTalk_DLL" \
+      PYTHONPATH="$dir/Library/TeamTalkPy" \
+      "$bin" -c 'import TeamTalk5' ) >/dev/null 2>&1 || return 1
+    return 0
+}
+
+sdk_install_best() {
+    local repo="$1" py="$2" host_glibc tmp url ub name need dir ok=""
+    host_glibc="$(sdk_host_glibc)"
+    [ -n "$host_glibc" ] || host_glibc="0"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        sdk_log "    [проверка] поиск свежего SDK на bearware.dk и загрузка подходящей сборки"
+        return 0
+    fi
+
+    sdk_log "  glibc системы: $host_glibc"
+    tmp="$(mktemp -d)"
+    while read -r ub url; do
+        [ -n "${url:-}" ] || continue
+        need="$(sdk_ubuntu_glibc "$ub")"
+        if ! sdk_ver_le "$need" "$host_glibc"; then
+            sdk_log "  сборка для Ubuntu $ub (glibc $need) не подойдёт — пропускаю"
+            continue
+        fi
+        sdk_log "  Качаю $(basename "$url")..."
+        if ! curl -fsSL -m 600 -o "$tmp/sdk.7z" "$url"; then
+            sdk_log "  ! не скачалось"
+            continue
+        fi
+        rm -rf "${tmp:?}/x"; mkdir -p "$tmp/x"
+        if ! 7z x -y -o"$tmp/x" "$tmp/sdk.7z" >/dev/null 2>&1; then
+            sdk_log "  ! не распаковалось (нужен p7zip-full)"
+            continue
+        fi
+        dir="$(find "$tmp/x" -maxdepth 1 -mindepth 1 -type d | head -1)"
+        [ -n "$dir" ] || continue
+        name="$(basename "$dir")"
+        if sdk_test_load "$dir" "$py"; then
+            sdk_log "  Проверка импорта: OK"
+            mkdir -p "$repo/sdk"
+            rm -rf "${repo:?}/sdk/$name"
+            mkdir -p "$repo/sdk/$name"
+            cp -a "$dir/." "$repo/sdk/$name/"
+            ok="$repo/sdk/$name"
+            break
+        fi
+        sdk_log "  ! сборка не грузится (нужен более новый glibc) — пробую следующую"
+    done <<EOF
+$(sdk_candidates)
+EOF
+    rm -rf "$tmp"
+    printf '%s' "$ok"
+}
+
 do_install() {
     local REPO_DIR="$SCRIPT_DIR" SECRETS_DIR="" git_url="$REPO_URL_DEFAULT"
     local TEAMTALK_HOST="" TEAMTALK_TCP_PORT="" TEAMTALK_UDP_PORT=""
@@ -481,12 +594,16 @@ do_install() {
     say ""
     say "== 3/7 Системные пакеты =="
     if command -v sudo >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-        say "  ffmpeg, python3, pip, venv..."
+        say "  ffmpeg, python3 (pip, venv), curl, ca-certificates, unzip, git, p7zip..."
         run sudo apt-get update -y
-        run sudo apt-get install -y ffmpeg python3 python3-pip python3-venv
+        run sudo apt-get install -y ffmpeg python3 python3-pip python3-venv \
+            curl ca-certificates wget unzip git p7zip-full
     else
         say "  sudo/apt-get не найдены — пропускаю (пакеты нужно установить заранее)."
     fi
+    for bin in ffmpeg python3 curl; do
+        command -v "$bin" >/dev/null 2>&1 || say "  !! не найден $bin — без него бот не заработает."
+    done
 
     # --- 4. python-окружение ---
     say ""
@@ -496,19 +613,51 @@ do_install() {
     else
         run python3 -m venv "$REPO_DIR/.venv"
     fi
-    run "$REPO_DIR/.venv/bin/python" -m pip install --upgrade pip
-    run "$REPO_DIR/.venv/bin/python" -m pip install --upgrade yt-dlp yandex-music
+    local PY="$REPO_DIR/.venv/bin/python"
+    run "$PY" -m pip install --upgrade pip wheel
+    run "$PY" -m pip install --upgrade requests yt-dlp yandex-music
+
+    # Deno нужен yt-dlp для YouTube: без него часть форматов недоступна
+    if command -v deno >/dev/null 2>&1; then
+        say "  Deno уже есть: $(command -v deno)"
+    else
+        local DENO_ANS="n"
+        ask_yn DENO_ANS "  Поставить Deno (нужен yt-dlp для YouTube)" y
+        if [ "$DENO_ANS" = "y" ]; then
+            say "  Ставлю Deno в /usr/local/bin..."
+            if run sudo env DENO_INSTALL=/usr/local sh -c 'curl -fsSL https://deno.land/install.sh | sh' >/dev/null 2>&1; then
+                say "  Deno: $(command -v deno || echo 'не найден')"
+            else
+                say "  !! Deno не установился — YouTube может отдавать не все форматы."
+            fi
+        fi
+    fi
 
     # --- 5. SDK ---
     say ""
     say "== 5/7 TeamTalk SDK =="
-    local SDK_LIB=""
-    SDK_LIB="$(ls -d "$REPO_DIR"/sdk/tt5sdk*/Library/TeamTalk_DLL/libTeamTalk5.so 2>/dev/null | head -1 || true)"
+    local SDK_LIB="" SDK_DIR="" BUNDLED=""
+    BUNDLED="$(ls -d "$REPO_DIR"/sdk/tt5sdk*/Library/TeamTalk_DLL/libTeamTalk5.so 2>/dev/null | head -1 || true)"
+    SDK_DIR="$(sdk_install_best "$REPO_DIR" "$PY" || true)"
+    if [ -n "$SDK_DIR" ] && [ -f "$SDK_DIR/Library/TeamTalk_DLL/libTeamTalk5.so" ]; then
+        SDK_LIB="$SDK_DIR/Library/TeamTalk_DLL/libTeamTalk5.so"
+    elif [ -n "$BUNDLED" ]; then
+        SDK_LIB="$BUNDLED"
+        SDK_DIR="$(cd "$(dirname "$BUNDLED")/../.." && pwd)"
+        say "  Беру SDK из репозитория: $(basename "$SDK_DIR")"
+    fi
     if [ -n "$SDK_LIB" ]; then
-        say "  SDK найден: $SDK_LIB"
+        run ln -sfn "$(basename "$SDK_DIR")" "$REPO_DIR/sdk/current"
+        say "  SDK: $SDK_DIR"
+        if sdk_test_load "$SDK_DIR" "$PY"; then
+            say "  Импорт TeamTalk5: OK"
+        else
+            say "  !! TeamTalk5 не импортируется — проверьте SDK вручную."
+        fi
     else
-        say "  !! SDK не найден (sdk/tt5sdk*/Library/TeamTalk_DLL/libTeamTalk5.so)."
-        say "     Проверьте, что репозиторий склонирован полностью. Без SDK бот не запустится."
+        say "  !! SDK не найден и не скачался. Без него бот не запустится."
+        say "     Скачайте вручную: https://bearware.dk/?page_id=419"
+        say "     и распакуйте в $REPO_DIR/sdk/"
     fi
 
     # --- 6. обход блокировки Telegram (только если нужен) ---

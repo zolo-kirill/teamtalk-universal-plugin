@@ -2,7 +2,14 @@
 # Wrapper: sets SDK env and secrets, runs the TeamTalk plugin bot.
 set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SDK="$DIR/sdk/tt5sdk_v5.22a_ubuntu22_x86_64"
+SDK="${TT_SDK_DIR:-$DIR/sdk/current}"
+if [ ! -d "$SDK/Library/TeamTalk_DLL" ]; then
+    SDK="$DIR/sdk/tt5sdk_v5.22a_ubuntu22_x86_64"
+fi
+if [ ! -d "$SDK/Library/TeamTalk_DLL" ]; then
+    SDK="$(ls -d "$DIR"/sdk/tt5sdk*/ 2>/dev/null | head -1 || true)"
+    SDK="${SDK%/}"
+fi
 
 export LD_LIBRARY_PATH="$SDK/Library/TeamTalk_DLL${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PYTHONPATH="$SDK/Library/TeamTalkPy${PYTHONPATH:+:$PYTHONPATH}"
