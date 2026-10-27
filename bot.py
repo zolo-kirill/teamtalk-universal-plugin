@@ -4499,12 +4499,31 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception as e:
             log("greet voice err: %s" % str(e)[:150])
 
+    def _audio_active(self):
+        """Играет ли сейчас звук в канал: трек ИЛИ живой поток (радио).
+
+        У радио self.playing остаётся False: поток бесконечный, прогресс по
+        нему не считается. Одного флага мало — иначе приветствие решает, что
+        музыки нет, глушит поток и после фразы тишина. Смотрим ещё на
+        cur_source с признаком radio и на живой поток отправки.
+        """
+        try:
+            if self.playing and not self.paused:
+                return True
+            cs = self.cur_source
+            t = self.voice_thread
+            if cs and len(cs) >= 3 and cs[2] and t is not None and t.is_alive():
+                return True
+        except Exception:
+            pass
+        return False
+
     def _greet_voice_worker(self, text):
         pcm = self._tts_silero_pcm(text)
         if not pcm:
             return
         dur = len(pcm) / float(VOICE_RATE * VOICE_CHANNELS * 2)
-        music = bool(self.playing and not self.paused)
+        music = self._audio_active()
         if music:
             with self._greet_lock:
                 if self._greet_buf is not None:
@@ -4541,6 +4560,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             path = self._greet_wav(text, pcm)
             if not path:
                 return
+            cs_prev = self.cur_source
+            prev_radio = cs_prev if (cs_prev and len(cs_prev) >= 3 and cs_prev[2]) else None
             self._start_voice(path, 0)
             my_thread = self.voice_thread  # свой поток: чужая остановка не собьёт ожидание
             t0 = time.time()
@@ -4554,6 +4575,10 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._stop_voice()  # страховка, если поток завис
             log("greet voice: отдельным потоком, %.1f с (ждали %.1f с, обрыв=%s)"
                 % (dur, time.time() - t0, "да" if alive else "нет"))
+            # Поток (радио) был остановлен ради фразы — возвращаем его.
+            if prev_radio and not self._audio_active():
+                self._play_radio(prev_radio[0], prev_radio[1])
+                log("greet voice: поток возвращён после приветствия")
         finally:
             self._speak_lock.release()
 
