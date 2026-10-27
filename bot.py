@@ -301,6 +301,47 @@ def _cfg(path, env=None, default=None):
     return default
 
 
+_CYR_DIGRAPHS = (
+    ("sch", "щ"), ("tch", "ч"), ("dzh", "дж"), ("sh", "ш"), ("ch", "ч"),
+    ("th", "т"), ("ph", "ф"), ("kh", "х"), ("zh", "ж"), ("ck", "к"),
+    ("qu", "кв"), ("kn", "н"), ("wh", "в"), ("wr", "р"),
+    ("ight", "айт"), ("igh", "ай"), ("eigh", "эй"),
+    ("oo", "у"), ("ee", "и"), ("ea", "и"), ("ay", "эй"), ("ey", "эй"),
+    ("oy", "ой"), ("ai", "эй"), ("ei", "эй"), ("ou", "ау"), ("ow", "оу"),
+    ("ya", "я"), ("yu", "ю"), ("yo", "ё"), ("ye", "е"),
+    ("ce", "се"), ("ci", "си"), ("cy", "си"),
+)
+_CYR_LETTERS = {
+    "a": "а", "b": "б", "c": "к", "d": "д", "e": "е", "f": "ф", "g": "г",
+    "h": "х", "i": "и", "j": "дж", "k": "к", "l": "л", "m": "м", "n": "н",
+    "o": "о", "p": "п", "q": "к", "r": "р", "s": "с", "t": "т", "u": "у",
+    "v": "в", "w": "в", "x": "кс", "y": "й", "z": "з",
+}
+
+
+def _cyr_for_tts(text):
+    """Транслитерировать латиницу в кириллицу для Silero.
+
+    Silero v4_ru не читает латинские слова: «Играет: Matt Nash - Know My Love»
+    звучит как одно «Играет» (0.8 с вместо 2.4 с). Названия треков почти всегда
+    латиницей, поэтому переводим их в кириллицу.
+    """
+    out = []
+    for token in re.split(r"([A-Za-z]+)", text or ""):
+        if not token or not ("a" <= token[0].lower() <= "z"):
+            out.append(token)
+            continue
+        low = token.lower()
+        if low.startswith("w"):
+            low = "у" + low[1:]          # weeknd -> уикнд
+        if low.endswith("y") and len(low) >= 2:
+            low = low[:-1] + "ай"        # my -> май, lucky -> лукай
+        for src, dst in _CYR_DIGRAPHS:
+            low = low.replace(src, dst)
+        out.append("".join(_CYR_LETTERS.get(ch, ch) for ch in low))
+    return "".join(out)
+
+
 def _save_config(patch):
     """Deep-merge `patch` into the on-disk config (CONFIG_PATH) and rewrite the
     file atomically, so runtime changes survive a restart."""
@@ -782,10 +823,11 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("channel_msg save err: %s" % e)
 
     def _load_voice_announce(self):
+        # Файл перекрывает конфиг: ручное «vo» сильнее настройки music.voice_announce.
         try:
             return open(VOICE_ANNOUNCE_FILE).read().strip() == "1"
         except Exception:
-            return False
+            return bool(_cfg("music.voice_announce", None, True))
 
     def _save_voice_announce(self):
         try:
@@ -2668,19 +2710,70 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._notify("Сейчас играет: %s" % title)
         self._set_status("Playing: %s" % title)
         if self.voice_announce and title:
-            # Озвучку синтезируем в фоновом потоке: запрос к Google занимает до
-            # 8 с, держать главный цикл на это время заблокированным нельзя —
-            # бот перестанет отвечать на команды. Пока идёт синтез, трек ждёт
-            # (_announce_pending), главный поток остаётся свободным.
-            self._stop_voice()  # остановить текущий трек: его voice_finished не должен гасить pending
-            self._announce_pending = (path, 0)
-            t = threading.Thread(
-                target=self._announce_worker, args=(url, title, path), daemon=True
-            )
-            t.start()
+            # Трек стартует сразу, а название звучит поверх него: синтез идёт в
+            # фоне, музыка на время фразы приглушается до WELCOME_VOICE_DUCK.
+            self._start_voice(path, 0)
+            self._music_broadcast(path, title)
+            threading.Thread(
+                target=self._announce_title, args=(title,), daemon=True
+            ).start()
             return
         self._start_voice(path, 0)
         self._music_broadcast(path, title)  # раздать трек подписчикам музыки (в фоне)
+
+    def _speak_over(self, text, label="announce"):
+        """Озвучить текст поверх музыки с приглушением (Silero).
+
+        Синтез синхронный — вызывать только из фонового потока. PCM
+        подмешивается в исходящий поток через _greet_buf, тот же механизм,
+        что у голосового приветствия.
+        """
+        try:
+            pcm = self._tts_silero_pcm(text)
+        except Exception as e:
+            log("%s: синтез не удался: %s" % (label, str(e)[:120]))
+            return
+        if not pcm:
+            log("%s: синтез вернул пусто" % label)
+            return
+        if not (self.playing and not self.paused):
+            log("%s: музыка не играет — не озвучиваю" % label)
+            return
+        dur = len(pcm) / float(VOICE_RATE * VOICE_CHANNELS * 2)
+        with self._greet_lock:
+            if self._greet_buf is not None:
+                log("%s: уже звучит голос — пропускаю" % label)
+                return
+            self._greet_buf = pcm
+            self._greet_pos = 0
+        self.duck = WELCOME_VOICE_DUCK
+        self.cur_vol = min(self.cur_vol, (self.volume / 100.0) * WELCOME_VOICE_DUCK)
+        t0 = time.time()
+        try:
+            while time.time() - t0 < dur + 2.0:
+                with self._greet_lock:
+                    if self._greet_buf is None:
+                        break
+                time.sleep(0.05)
+        finally:
+            self.duck = 1.0
+            with self._greet_lock:
+                if self._greet_buf is not None:
+                    self._greet_buf = None
+                    self._greet_pos = 0
+        log("%s: озвучено %.1f с" % (label, dur))
+
+    def _announce_title(self, title):
+        """Озвучить название запущенного трека. Только из фонового потока."""
+        try:
+            txt = " ".join(str(title or "").split())
+            if not txt:
+                return
+            if len(txt) > 120:
+                txt = txt[:117].rstrip() + "..."
+            self._speak_over("Играет: %s" % txt, "announce")
+        except Exception as e:
+            log("announce err: %s" % str(e)[:150])
 
     def _announce_worker(self, url, title, path):
         """Синтез озвучки названия вне главного потока. Итог — событие в api_q."""
@@ -4195,6 +4288,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         """
         if not text:
             return None
+        # Silero не читает латиницу — переводим её в кириллицу
+        text = _cyr_for_tts(text)
         key = hashlib.sha1(("%s|%s" % (WELCOME_VOICE_SPEAKER, text)).encode("utf-8")).hexdigest()[:16]
         raw = os.path.join(CACHE_DIR, "greet_%s.raw" % key)
         if os.path.exists(raw) and os.path.getsize(raw) > 1000:

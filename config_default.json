@@ -130,5 +130,8 @@
         "192.168."
       ]
     }
+  },
+  "music": {
+    "voice_announce": true
   }
 }
