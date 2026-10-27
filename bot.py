@@ -350,6 +350,7 @@ BANS_FILE = os.path.join(BASE_DIR, "bans.json")  # кого бот забани�
 REPLIES_FILE = os.path.join(BASE_DIR, "replies.json")  # пересланные сообщения TeamTalk: tg_message_id → tt_user_id
 REPLY_TTL_SEC = 3600  # сколько можно ответить на пересланное сообщение (1 ч, как в sender-rs)
 MUSIC_SUBS_FILE = os.path.join(BASE_DIR, "music_subs.json")  # подписчики на музыку в Telegram
+LAST_PLAYED_FILE = os.path.join(BASE_DIR, "last_played.json")  # последний трек: переживает перезапуск
 MUSIC_SUB_TTL_SEC = 86400  # сколько живёт ссылка подписки на музыку (24 ч)
 
 TG_TOKEN = str(_cfg("telegram.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
@@ -1420,6 +1421,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.voice_offset_base = 0
         self.voice_started_at = 0
         self.queue.clear()
+        self._forget_last()
         self._set_status(self.status_msg)
 
     def _player_cb(self, cq, data):
@@ -2596,6 +2598,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.current_file = path
         self.current = (url, title)
         self.cur_source = (url, title, False)
+        self._remember_last(url, title, False)
         self.playing = True
         self.paused = False
         self.cur_offset_ms = 0
@@ -2957,9 +2960,91 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.current_orig = None
         self.cur_source = (url, title, True)
         self.cur_offset_ms = 0
+        self._remember_last(url, title, True)
         self._send("Играет радио: %s" % title)
         self._set_status("Radio: %s" % title)
         self._start_voice(url, 0)
+
+    def _remember_last(self, key, label, is_radio):
+        """Запомнить последнее воспроизведение (переживает перезапуск)."""
+        try:
+            with open(LAST_PLAYED_FILE, "w", encoding="utf-8") as f:
+                json.dump({"key": key, "label": label, "radio": bool(is_radio)}, f, ensure_ascii=False)
+        except Exception as e:
+            log("last played save err: %s" % e)
+
+    def _forget_last(self):
+        """Ручной стоп отменяет автопродолжение после перезапуска."""
+        try:
+            os.remove(LAST_PLAYED_FILE)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log("last played clear err: %s" % e)
+
+    def _resume_last(self):
+        """Продолжить последнее воспроизведение после перезапуска."""
+        try:
+            with open(LAST_PLAYED_FILE, encoding="utf-8") as f:
+                it = json.load(f)
+        except Exception:
+            return
+        key = it.get("key")
+        label = it.get("label") or key
+        if not key:
+            return
+        log("resume last played: %s" % label)
+        try:
+            if it.get("radio"):
+                self._play_radio(key, label)
+            elif str(key).startswith(("http://", "https://")):
+                self._play_file(key, label, key)
+            elif str(key).startswith("ymtrack:"):
+                self._play_file(key, label, key)
+            else:
+                log("resume last: skip non-url source")
+        except Exception as e:
+            log("resume last err: %s" % e)
+
+    def _run_resume_last(self):
+        time.sleep(5)
+        try:
+            self._resume_last()
+        except Exception as e:
+            log("resume thread err: %s" % e)
+
+    def _mow_cmd(self):
+        """Моя волна — персональный поток Яндекс.Музыки."""
+        if not YM_TOKEN:
+            self._send("Токен Яндекс.Музыки не настроен. Добавьте services.ym.token в config.json.")
+            return
+        try:
+            from yandex_music import Client
+        except Exception:
+            self._send("Библиотека yandex-music не установлена. Выполните: pip install yandex-music")
+            return
+        try:
+            client = Client(YM_TOKEN).init()
+            station = client.rotor_station_tracks("user:onyourwave")
+            if not station or not station.sequence:
+                self._send("Моя волна недоступна. Проверьте токен Яндекс.Музыки.")
+                return
+            tracks = station.sequence
+            self._send("🌊 Моя волна — загружаю %d треков..." % len(tracks))
+            self.queue.clear()
+            for item in tracks:
+                tr = item.track
+                if not tr:
+                    continue
+                title = " - ".join(tr.artists_name()) + " - " + tr.title
+                self.queue.append(("ymtrack:%s" % tr.track_id, title))
+            if self.queue:
+                self._enqueue_next()
+            else:
+                self._send("Моя волна: треки не найдены.")
+        except Exception as e:
+            self._send("Моя волна: ошибка — %s" % str(e)[:150])
+            log("mow err: %s" % str(e))
 
     # Команды-«запросы», которые при приходе из Telegram объявляются в канале TeamTalk.
     _TG_KNOWN_CMDS = frozenset([
@@ -2967,7 +3052,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         "cn", "cs", "s", "stop", "skip", "queue", "q", "status", "now",
         "dl", "download", "lf", "n", "next", "b", "back", "prev", "playlist",
         "radio", "r", "f", "fav", "favorites", "play", "p", "pause", "resume",
-        "channel", "u", "link", "url",
+        "channel", "u", "link", "url", "mow", "волна",
     ])
 
     def _is_known_cmd(self, text):
@@ -3031,6 +3116,15 @@ class MusicBot(TeamTalk5.TeamTalk):
         if from_user:
             self.reply_user_id = from_user
         self.silent = False  # explicit command → report status again
+
+        # --- гости не управляют ботом ---
+        if from_user and self._is_guest_user(from_user):
+            self._send_to_tt_user(
+                from_user,
+                "Гостям управление ботом недоступно. Зарегистрируйтесь на портале.",
+            )
+            log("guest bot command denied: uid=%s" % from_user)
+            return
 
         # --- гейт: служебные команды — только администраторам ---
         # (в TeamTalk админ = USERTYPE_ADMIN; из Telegram сюда попадают уже после _tg_allowed)
@@ -3169,6 +3263,7 @@ class MusicBot(TeamTalk5.TeamTalk):
 
         # --- стоп / скип / очередь / статус / помощь ---
         if cmd in ("s", "stop"):
+            self._forget_last()
             self.queue.clear()
             self.downloading.clear()
             self.auto_list = False
@@ -3195,6 +3290,10 @@ class MusicBot(TeamTalk5.TeamTalk):
 
         if cmd in ("status", "now"):
             self._status_cmd()
+            return
+
+        if cmd in ("mow", "волна", "моя волна"):
+            self._mow_cmd()
             return
 
         # --- загрузить играющий трек файлом в канал (сервер TeamTalk): dl / скачать / download ---
@@ -3502,6 +3601,9 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self.my_channel_id = user.nChannelID
                 self._ready_time = time.time()
                 log("joined channel id %d" % self.my_channel_id)
+                if not getattr(self, "_resume_started", False):
+                    self._resume_started = True
+                    threading.Thread(target=self._run_resume_last, daemon=True).start()
         except Exception:
             pass
 
@@ -3697,6 +3799,20 @@ class MusicBot(TeamTalk5.TeamTalk):
         if TG_OWNER_USER_ID:
             ids.add(TG_OWNER_USER_ID)
         return ids
+
+    def _is_guest_user(self, from_user):
+        """True, если команду прислала общая гостевая учётка."""
+        if not from_user:
+            return False
+        u = self.users.get(from_user)
+        if not u:
+            try:
+                u = self.getUser(from_user)
+            except Exception:
+                u = None
+        if not u:
+            return False
+        return (self._tt_field(u, "szUsername") or "").strip().lower() in {"гость", "guest"}
 
     def _is_admin(self, from_user):
         """TeamTalk: админ = USERTYPE_ADMIN (2) на сервере. Telegram-путь (from_user=0)

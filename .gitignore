@@ -40,3 +40,6 @@ favorites.json
 .voice_announce
 .ytdlp_update
 *.bak-*
+
+# Последний проигранный трек (возобновление после рестарта)
+last_played.json
