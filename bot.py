@@ -475,6 +475,15 @@ WELCOME_VOICE_LABELS = {
 WELCOME_VOICE_DUCK = float(_cfg("welcome.voice_duck", None, 0.15) or 0.15)
 # Приглушение эфира на время голосового из Телеграма (music.voice_duck)
 VOICE_FILE_DUCK = float(_cfg("music.voice_duck", None, 0.2) or 0.2)
+# Прямые трансляции. Twitch отдаёт HLS только по внутреннему GQL-запросу
+# (публичный Client-ID веб-плеера, без входа в аккаунт), Kick — через свой
+# открытый API канала. yt-dlp для Kick не годится, для Twitch требует входа.
+_TWITCH_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
+_TWITCH_GQL = "https://gql.twitch.tv/gql"
+_TWITCH_GQL_HASH = "0828119ded1c13477966434e15800ff57ddacf13ba1911c129dc2200705b0712"
+_STREAM_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
 try:
     # 0 — приветствовать каждый вход; «or 0» нужен, чтобы 0 не превращался в 900
     WELCOME_VOICE_COOLDOWN = max(0, int(_cfg("welcome.voice_cooldown", None, 900) or 0))
@@ -2368,9 +2377,159 @@ class MusicBot(TeamTalk5.TeamTalk):
                 log("stream probe %s fail %s: %s" % (method, url, e))
         return False
 
+    # Страницы трансляций: разбираем и играем HLS, а не качаем файл.
+    _KICK_RESERVED = ("video", "videos", "category", "categories", "following",
+                      "browse", "search", "dashboard", "settings", "login",
+                      "signup", "about", "help", "terms", "privacy", "clips",
+                      "clip", "stream", "streams")
+
+    def _platform_of(self, url):
+        """'twitch', 'kick' или None по адресу страницы."""
+        try:
+            host = (urllib.parse.urlsplit(url or "").netloc or "").lower()
+        except Exception:
+            return None
+        if "twitch.tv" in host or host.endswith("ttvnw.net"):
+            return "twitch"
+        if "kick.com" in host:
+            return "kick"
+        return None
+
+    def _twitch_login(self, url):
+        """twitch.tv/<канал>, m.twitch.tv/<канал>, player.twitch.tv/?channel=<канал>."""
+        try:
+            sp = urllib.parse.urlsplit(url)
+        except Exception:
+            return None
+        qs = urllib.parse.parse_qs(sp.query or "")
+        ch = (qs.get("channel") or qs.get("login") or [""])[0].strip()
+        if ch:
+            return ch.strip("/").lower()
+        parts = [p for p in (sp.path or "").split("/") if p.strip()]
+        if not parts:
+            return None
+        if parts[0].lower() in ("directory", "videos", "video", "search",
+                                "downloads", "settings", "subscriptions"):
+            return None
+        return parts[0].lower()
+
+    def _kick_slug(self, url):
+        """kick.com/<канал> -> slug канала."""
+        try:
+            sp = urllib.parse.urlsplit(url)
+        except Exception:
+            return None
+        parts = [p for p in (sp.path or "").split("/") if p.strip()]
+        if not parts:
+            return None
+        slug = parts[0].lower()
+        if slug in self._KICK_RESERVED:
+            return None
+        return slug
+
+    def _http_json(self, url, headers=None, method="GET", body=None, timeout=10):
+        """JSON по HTTP: сначала напрямую, при сбое — через прокси окружения."""
+        hdrs = {"User-Agent": _STREAM_UA}
+        hdrs.update(headers or {})
+        tries = [None]
+        for p in (os.environ.get("YT_PROXY"), os.environ.get("HTTPS_PROXY"),
+                  os.environ.get("TG_PROXY")):
+            if p and p not in tries:
+                tries.append(p)
+        last = None
+        for proxy in tries:
+            try:
+                kw = {"timeout": timeout, "headers": hdrs}
+                if proxy:
+                    kw["proxies"] = {"http": proxy, "https": proxy}
+                if method == "POST":
+                    r = requests.post(url, json=body, **kw)
+                else:
+                    r = requests.get(url, **kw)
+                if r.status_code >= 400:
+                    last = Exception("HTTP %s" % r.status_code)
+                    continue
+                return r.json()
+            except Exception as e:
+                last = e
+        raise last if last else Exception("нет ответа")
+
+    def _twitch_hls(self, login):
+        """m3u8 живого канала Twitch через публичный GQL-запрос."""
+        body = {"operationName": "PlaybackAccessToken",
+                "variables": {"isLive": True, "login": login, "isVod": False,
+                              "vodID": "", "playerType": "site"},
+                "extensions": {"persistedQuery": {"version": 1,
+                                                  "sha256Hash": _TWITCH_GQL_HASH}}}
+        data = self._http_json(_TWITCH_GQL, method="POST", body=body,
+                               headers={"Client-ID": _TWITCH_CLIENT_ID})
+        tok = ((data or {}).get("data") or {}).get("streamPlaybackAccessToken")
+        if not tok:
+            return None
+        q = urllib.parse.urlencode({"allow_source": "true",
+                                    "allow_audio_only": "true",
+                                    "player": "twitchweb", "p": "1234567",
+                                    "type": "any", "sig": tok.get("signature"),
+                                    "token": tok.get("value")})
+        return "https://usher.ttvnw.net/api/channel/hls/%s.m3u8?%s" % (login, q)
+
+    def _kick_hls(self, slug):
+        """(m3u8, заметка) живого канала Kick."""
+        data = self._http_json("https://kick.com/api/v2/channels/%s" % slug,
+                               headers={"Accept": "application/json"})
+        if not data:
+            return None, "канал не найден"
+        if not data.get("livestream"):
+            return None, "канал офлайн"
+        url = (data.get("playback_url") or "").strip()
+        if not url:
+            return None, "нет ссылки на поток"
+        return url, "ok"
+
+    def _resolve_live_platform(self, url):
+        """Ссылка на трансляцию -> (m3u8, подпись) либо (None, причина)."""
+        kind = self._platform_of(url)
+        if kind == "twitch":
+            login = self._twitch_login(url)
+            if not login:
+                return None, "не понял, какой канал включить"
+            try:
+                hls = self._twitch_hls(login)
+            except Exception as e:
+                return None, "Twitch не ответил: %s" % str(e)[:80]
+            if not hls:
+                return None, "канал %s сейчас не в эфире" % login
+            return hls, "Twitch · %s" % login
+        if kind == "kick":
+            slug = self._kick_slug(url)
+            if not slug:
+                return None, "не понял, какой канал включить"
+            try:
+                hls, note = self._kick_hls(slug)
+            except Exception as e:
+                return None, "Kick не ответил: %s" % str(e)[:80]
+            if not hls:
+                return None, "%s — %s" % (slug, note)
+            return hls, "Kick · %s" % slug
+        return None, "не трансляция"
+
     def _handle_url(self, url, label):
         """Play a direct link; a YouTube/Yandex playlist queues all its tracks."""
         url = self._normalize_ym_url(url)
+        if self._platform_of(url):
+            kind = "Twitch" if self._platform_of(url) == "twitch" else "Kick"
+            self._send("Смотрю трансляцию %s…" % kind)
+            hls, note = self._resolve_live_platform(url)
+            if not hls:
+                log("live %s: отказ — %s" % (kind, note))
+                self._send("Не получилось: %s" % note)
+                return
+            log("live %s: %s" % (kind, note))
+            self._play_radio(hls, note)
+            # помним страницу, а не ссылку с токеном: после перезапуска
+            # её надо получать заново
+            self._remember_last(url, note, True)
+            return
         if self._is_live_stream(url):
             self._play_radio(url, label)
             return
@@ -3243,7 +3402,10 @@ class MusicBot(TeamTalk5.TeamTalk):
             return
         log("resume last played: %s" % label)
         try:
-            if it.get("radio"):
+            if self._platform_of(key):
+                # токен в ссылке на трансляцию живёт недолго — берём заново
+                self._handle_url(key, label)
+            elif it.get("radio"):
                 self._play_radio(key, label)
             elif str(key).startswith(("http://", "https://")):
                 self._play_file(key, label, key)
@@ -3285,6 +3447,9 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return
             url = STARTUP_URL
             log("startup url: %s" % url)
+            if self._platform_of(url):
+                self._handle_url(url, url)
+                return
             if self._is_live_stream(url):
                 self._play_radio(url, url)
             else:
