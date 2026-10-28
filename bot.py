@@ -473,6 +473,8 @@ WELCOME_VOICE_LABELS = {
     "aidar": "Айдар (муж)",
 }
 WELCOME_VOICE_DUCK = float(_cfg("welcome.voice_duck", None, 0.15) or 0.15)
+# Приглушение эфира на время голосового из Телеграма (music.voice_duck)
+VOICE_FILE_DUCK = float(_cfg("music.voice_duck", None, 0.2) or 0.2)
 try:
     # 0 — приветствовать каждый вход; «or 0» нужен, чтобы 0 не превращался в 900
     WELCOME_VOICE_COOLDOWN = max(0, int(_cfg("welcome.voice_cooldown", None, 900) or 0))
@@ -1284,7 +1286,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                                            % (max(dur, 1), getattr(self, "my_channel_path", "/")))
                     except Exception:
                         pass
-            self.api_q.put(("local_file", path, title[:80]))
+            self.api_q.put(("voice_file" if is_voice else "local_file", path, title[:80]))
 
     def _tg_cookies_mode_active(self):
         """Режим ожидания файла кук активен? Гасится сам по истечении времени."""
@@ -2787,6 +2789,72 @@ class MusicBot(TeamTalk5.TeamTalk):
                     self._greet_buf = None
                     self._greet_pos = 0
         log("%s: озвучено %.1f с" % (label, dur))
+
+    def _file_to_pcm(self, path):
+        """Файл (mp3/ogg/m4a) -> s16le стерео 48 кГц для подмешивания в эфир."""
+        try:
+            cmd = ["ffmpeg", "-v", "error", "-i", str(path), "-vn",
+                   "-f", "s16le", "-acodec", "pcm_s16le",
+                   "-ar", str(VOICE_RATE), "-ac", str(VOICE_CHANNELS), "-"]
+            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               timeout=300)
+            data = p.stdout or b""
+            frame = VOICE_CHANNELS * 2
+            if len(data) % frame:
+                data = data[:len(data) - (len(data) % frame)]
+            if not data:
+                err = (p.stderr or b"")[:200].decode("utf-8", "replace")
+                log("voice_file: пустое аудио (%s)" % err)
+                return None
+            return data
+        except Exception as e:
+            log("voice_file: decode err: %s" % str(e)[:150])
+            return None
+
+    def _speak_file_over(self, path, title="Голосовое"):
+        """Голосовое из Телеграма поверх эфира: приглушить, проиграть, вернуть.
+
+        Эфир не останавливается: голос подмешивается в тот же поток через
+        _greet_buf, музыка уходит до VOICE_FILE_DUCK на время фразы и потом
+        возвращается. Если ничего не играет — файл идёт обычным путём.
+        """
+        if not self._audio_active():
+            log("voice_file: звук не идёт — играю как обычно")
+            self.api_q.put(("local_file", path, title))
+            return
+        pcm = self._file_to_pcm(path)
+        if not pcm:
+            self.api_q.put(("local_file", path, title))
+            return
+        dur = len(pcm) / float(VOICE_RATE * VOICE_CHANNELS * 2)
+        with self._greet_lock:
+            if self._greet_buf is not None:
+                log("voice_file: уже звучит голос — пропускаю")
+                return
+            self._greet_buf = pcm
+            self._greet_pos = 0
+        self.duck = VOICE_FILE_DUCK
+        self.cur_vol = min(self.cur_vol, (self.volume / 100.0) * VOICE_FILE_DUCK)
+        t0 = time.time()
+        try:
+            while time.time() - t0 < dur + 3.0:
+                with self._greet_lock:
+                    if self._greet_buf is None:
+                        break
+                time.sleep(0.05)
+        finally:
+            self.duck = 1.0
+            # Эфир мог смениться посреди фразы — остаток не должен
+            # подмешаться в следующий трек.
+            with self._greet_lock:
+                if self._greet_buf is not None:
+                    self._greet_buf = None
+                    self._greet_pos = 0
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        log("voice_file: поверх эфира, %.1f с" % dur)
 
     def _announce_title(self, title):
         """Озвучить название запущенного трека. Только из фонового потока."""
@@ -5398,6 +5466,10 @@ class MusicBot(TeamTalk5.TeamTalk):
                 elif kind == "status":
                     _, msg = item
                     self._send(msg)
+                elif kind == "voice_file":
+                    _, path, title = item
+                    threading.Thread(target=self._speak_file_over,
+                                     args=(path, title), daemon=True).start()
                 elif kind == "local_file":
                     _, path, title = item
                     self._play_local(path, title)
