@@ -5,14 +5,12 @@
 # при необходимости поднимает обход блокировки Telegram из VPN-ключа,
 # создаёт .secrets/.env, настраивает systemd-сервис и запускает бота.
 #
-# Автор: Kirill. Вопросы — @zolo-kirill в Telegram.
-#
 # Запуск: bash install.sh
 # Тестовый режим (без реальных действий): SETUP_DRY_RUN=1 bash install.sh
 set -euo pipefail
 
-CREATOR_LINE="Автор: Kirill (@zolo-kirill)"
-REPO_URL_DEFAULT="https://github.com/zolo-kirill/teamtalk-universal-plugin.git"
+CREATOR_LINE="Проект: TeamTalk Universal Plugin"
+REPO_URL_DEFAULT="${REPO_URL_DEFAULT:-}"
 UNIT_NAME="tt-plugin.service"
 UNIT_DIR="$HOME/.config/systemd/user"
 XRAY_CONF="${XRAY_CONF:-/usr/local/etc/xray/config.json}"
@@ -523,6 +521,10 @@ do_install() {
     if [ ! -f "$REPO_DIR/bot.py" ]; then
         say "  Рядом с установщиком нет bot.py — клонирую репозиторий."
         ask git_url "Адрес репозитория" "$REPO_URL_DEFAULT"
+        if [ -z "$git_url" ]; then
+            say "  Адрес не указан. Разместите bot.py и install.sh в одном каталоге и повторите установку."
+            return 1
+        fi
         ask REPO_DIR "Куда клонировать?" "$HOME/teamtalk-universal-plugin"
         REPO_DIR="${REPO_DIR/#\~/$HOME}"
         if [ -e "$REPO_DIR" ]; then
@@ -904,7 +906,7 @@ say "    • переключает треки, перематывает, мен
 say "    • проигрывает в канале аудио и команды из Telegram-реле;"
 say "    • сообщает в Telegram о входе и выходе пользователей."
 say ""
-say "  Автор: Kirill (@zolo-kirill)"
+say "  $CREATOR_LINE"
 say ""
 if [ "$DRY_RUN" = "1" ]; then
     say "  (режим проверки SETUP_DRY_RUN=1 — реальных действий не выполняется)"

@@ -201,7 +201,7 @@ def _tg_urlopen(req, timeout):
 
 # ---- признаки ботнет-клиентов (массовые входы «мёртвых» ботов) ----
 # Флуд-ники вида «🤖 Shadow_Pilot_46»: эмодзи + латинское слово_слово_число.
-# Кириллические ники и одиночные подчёркивания («kirill_mobile») не трогаем.
+# Кириллические ники и одиночные подчёркивания («nick_mobile») не трогаем.
 _EMOJI_RE = re.compile(
     "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF\U00002190-\U000021FF\U0000FE0F\U00002300-\U000023FF]"
 )
@@ -3540,7 +3540,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("channel announce err: %s" % str(e)[:150])
 
     def _announce_tg_cmd(self, msg, text):
-        """Команда из Telegram объявляется в канале: «Кирилл запросил: радио ремикс FM»."""
+        """Команда из Telegram объявляется в канале: «Гость запросил: радио ремикс FM»."""
         try:
             if not self._is_known_cmd(text):
                 return
@@ -4674,7 +4674,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         """Озвучить приветствие текущим голосом прямо в канал."""
         try:
             text = (WELCOME_VOICE_TEXT or "Привет, {nick}! Добро пожаловать на сервер {server}.").format(
-                nick="Кирилл", server=self._server_name() or "сервер")
+                nick="друг", server=self._server_name() or "сервер")
             self._greet_voice_worker(text)
         except Exception as e:
             log("voice test err: %s" % str(e)[:150])
@@ -4968,7 +4968,7 @@ class MusicBot(TeamTalk5.TeamTalk):
     @staticmethod
     def _nick_wl(nl, pref):
         """Ник в белом списке: точное совпадение или префикс до границы слова
-        (пробел/дефис/скобки), чтобы «kirill» не пускал «kirill_bot»."""
+        (пробел/дефис/скобки), чтобы «nick» не пускал «nick_bot»."""
         if nl == pref:
             return True
         if not nl.startswith(pref):
