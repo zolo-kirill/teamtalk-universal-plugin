@@ -201,7 +201,7 @@ def _tg_urlopen(req, timeout):
 
 # ---- признаки ботнет-клиентов (массовые входы «мёртвых» ботов) ----
 # Флуд-ники вида «🤖 Shadow_Pilot_46»: эмодзи + латинское слово_слово_число.
-# Кириллические ники и одиночные подчёркивания («nick_mobile») не трогаем.
+# Кириллические ники и одиночные подчёркивания («kirill_mobile») не трогаем.
 _EMOJI_RE = re.compile(
     "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF\U00002190-\U000021FF\U0000FE0F\U00002300-\U000023FF]"
 )
@@ -416,7 +416,10 @@ MUSIC_SUB_TTL_SEC = 86400  # сколько живёт ссылка подпис
 
 TG_TOKEN = str(_cfg("telegram.token", "TG_TOKEN", "")).strip()  # optional: own Telegram bot that relays files
 TG_OWNER_USER_ID = int(_cfg("telegram.owner_user_id", "TG_OWNER_USER_ID", 0) or 0)  # only this user can send commands
-TG_NOTIFY_CHAT_ID = int(_cfg("telegram.notify_chat_id", "TG_NOTIFY_CHAT_ID", 0) or 0)  # сюда слать вход/выход пользователей (0 = выкл)
+TG_NOTIFY_CHAT_ID = int(_cfg("telegram.notify_chat_id", "TG_NOTIFY_CHAT_ID", 0) or 0)
+TG_SEND_ONLY = str(_cfg("telegram.send_only", "TG_SEND_ONLY", "")).strip().lower() in ("1", "true", "yes", "on")  # только отправка, без опроса
+TG_JOIN_TO_SUBS = str(_cfg("telegram.join_leave_to_subs", "TG_JOIN_TO_SUBS", "")).strip().lower() in ("1", "true", "yes", "on")  # входы/выходы подписчикам
+  # сюда слать вход/выход пользователей (0 = выкл)
 TG_NOTIFY_SERVER = str(_cfg("telegram.server_display_name", "TG_NOTIFY_SERVER_NAME", "")).strip()  # пусто = брать имя сервера из TeamTalk
 TG_NOTIFY_IGNORE = {u.strip().lower() for u in (_cfg("telegram.ignore_usernames", None, []) or []) if u.strip()}
 TG_NOTIFY_IGNORE.add("bot_admin")  # все боты на одной админ-учётке — их не анонсируем
@@ -464,8 +467,15 @@ WELCOME_VOICE_BILINGUAL = bool(_cfg("welcome.voice_bilingual", None, True))
 WELCOME_EN_SPEAKER = str(_cfg("welcome.voice_en_speaker", None, "en_21") or "en_21").strip()
 
 # Голоса Silero v4_ru, доступные для выбора из Telegram
-WELCOME_VOICES = ("baya", "kseniya", "xenia", "eugene", "aidar")
+WELCOME_VOICES = ("ya:alena", "ya:filipp", "ya:jane", "ya:zahar", "ya:omazh", "ya:ermil",
+                  "baya", "kseniya", "xenia", "eugene", "aidar")
 WELCOME_VOICE_LABELS = {
+    "ya:alena": "Алиса (Яндекс)",
+    "ya:filipp": "Филипп (Яндекс)",
+    "ya:jane": "Джейн (Яндекс)",
+    "ya:zahar": "Захар (Яндекс)",
+    "ya:omazh": "Омаж (Яндекс)",
+    "ya:ermil": "Ермил (Яндекс)",
     "baya": "Бая (жен)",
     "kseniya": "Ксения (жен)",
     "xenia": "Ксения-2 (жен)",
@@ -490,6 +500,31 @@ try:
 except (TypeError, ValueError):
     WELCOME_VOICE_COOLDOWN = 900
 SILERO_MODEL_ID = str(_cfg("welcome.silero_model", None, "v4_ru") or "v4_ru")
+
+# ---- Имя сервера для озвучки -----------------------------------------
+_TT_JUNK_RE = re.compile(r"#[A-Za-z][A-Za-z0-9_-]*#")
+
+
+def _clean_server_name(name):
+    """Имя сервера без служебных хвостов TeamTalk и без эмодзи.
+
+    TeamTalk отдаёт имя вроде «Горизонт👍#teamtalkpublish#»: в синтезе речи
+    это превращается в кашу, поэтому оставляем буквы, цифры и пробелы.
+    """
+    s = _TT_JUNK_RE.sub(" ", str(name or ""))
+    out = []
+    for ch in s:
+        if ch.isspace():
+            out.append(" ")
+        elif ch.isalnum() and ord(ch) < 0x2500:
+            out.append(ch)
+        elif ch in "-'’«»":
+            out.append(ch)
+        else:
+            out.append(" ")
+    s = re.sub(r"\s+", " ", "".join(out)).strip(" -—,.")
+    return s or "сервер"
+
 TTS_SOCK = str(_cfg("welcome.tts_socket", None, "") or os.path.join(CACHE_DIR, "tts.sock"))
 _SILERO_LOCK = threading.Lock()
 _SILERO = {"model": None}
@@ -837,7 +872,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._prot_load_ranges()
         self.pending_replies = self._load_replies()  # двухсторонние реплики: tg message_id → данные пользователя
         self._prune_replies()
-        if TG_TOKEN:
+        if TG_TOKEN and not TG_SEND_ONLY:
             threading.Thread(target=self._tg_poll, daemon=True, name="tg-poll").start()
             threading.Thread(target=self._tg_register_commands, daemon=True, name="tg-cmds").start()
             log("telegram relay enabled")
@@ -1187,7 +1222,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                     if self._set_welcome_voice(arg):
                         self._tg_send_text(cid, "Голос приветствия: %s" % WELCOME_VOICE_LABELS.get(arg, arg))
                     else:
-                        self._tg_send_text(cid, "Такого голоса нет. Доступно: %s." % ", ".join(WELCOME_VOICES))
+                        self._tg_send_text(cid, "Такого голоса нет. Доступно: %s." % ", ".join(WELCOME_VOICE_LABELS.get(v, v) for v in WELCOME_VOICES))
                 vtext, vkb = self._voice_view()
                 self._tg_send_kb(cid, vtext, vkb)
                 return
@@ -2090,7 +2125,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         for client in self._YT_ALT_CLIENTS:
             for use_ck in (True, False):
                 cmd = list(YTDLP) + [
-                    "--no-playlist", "--no-simulate",
+                    "--no-playlist", "--extractor-retries", "3", "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36", "--impersonate", "chrome", "--no-simulate",
                     # Так же без mp3-транскода, как и основной клиент
                     "-f", "ba/b",
                     "--remote-components", "ejs:github",
@@ -2516,6 +2551,11 @@ class MusicBot(TeamTalk5.TeamTalk):
     def _handle_url(self, url, label):
         """Play a direct link; a YouTube/Yandex playlist queues all its tracks."""
         url = self._normalize_ym_url(url)
+        if "rutube.ru" in url:
+            # RuTube: не качаем файл, играем поток сразу
+            threading.Thread(target=self._play_rutube_stream,
+                             args=(url, label), daemon=True).start()
+            return
         if self._platform_of(url):
             kind = "Twitch" if self._platform_of(url) == "twitch" else "Kick"
             self._send("Смотрю трансляцию %s…" % kind)
@@ -2538,6 +2578,35 @@ class MusicBot(TeamTalk5.TeamTalk):
             threading.Thread(target=self._playlist_worker, args=(url,), daemon=True).start()
             return
         self._switch_to(url, label)
+
+    def _play_rutube_stream(self, url, label):
+        """RuTube без скачивания: прямой адрес потока -> эфир."""
+        try:
+            cmd = list(YTDLP) + [
+                "--no-playlist", "-g",
+                "-f", "ba/b[height<=144]/b[height<=144]/ba/b",
+                "--impersonate", "chrome",
+                "--socket-timeout", "20", "--extractor-retries", "8",
+                "--", url,
+            ]
+            rc, out, err = self._run_ydl(cmd, timeout=180)
+            lines = [l.strip() for l in (out or "").splitlines() if l.strip().startswith("http")]
+            if rc != 0 or not lines:
+                log("rutube stream: не получил адрес, качаю как раньше")
+                self._download_worker(url, label)
+                return
+            stream = lines[-1]
+            log("rutube stream: адрес получен (%d симв.), играю напрямую" % len(stream))
+            if ".m3u8" in stream or "m3u8" in stream:
+                self._play_radio(stream, label)
+            else:
+                self._play_file(stream, label, stream)
+        except Exception as e:
+            log("rutube stream err: %s" % str(e)[:150])
+            try:
+                self._download_worker(url, label)
+            except Exception:
+                pass
 
     def _download_worker(self, url, title):
         real_url = url
@@ -2592,8 +2661,8 @@ class MusicBot(TeamTalk5.TeamTalk):
                         self.api_q.put(("download_fail", url, title, "Не удалось скачать с Яндекс.Музыки: %s" % str(e)[:150]))
                         return
                 cmd = list(YTDLP) + [
-                    "--no-playlist",
-                    "--no-simulate",
+                    "--no-playlist", "--extractor-retries", "3", "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36",
+                    "--impersonate", "chrome", "--no-simulate",
                     # Без mp3-транскода: он на этом сервере жрёт ~16с на трек.
                     # Качаем лучший аудио-поток как есть (обычно opus/webm или m4a)
                     # и играем его через ffmpeg — в голосовом канале контейнер не важен.
@@ -2620,11 +2689,11 @@ class MusicBot(TeamTalk5.TeamTalk):
                 if YT_PO_TOKEN:
                     cmd += ["--extractor-args", YT_PO_TOKEN]
                 if "rutube.ru" in real_url:
-                    _proxy = _tunnel_proxy()
-                    if _proxy:
-                        cmd += ["--proxy", _proxy, "--retries", "10",
-                                "--fragment-retries", "10",
-                                "--retry-sleep", "linear=1:10"]
+                    # RuTube работает только напрямую: через туннель 1080 и мост
+                    # 8118 Qrator рвёт TLS (Recv failure, code 35). Повторы и
+                    # паузы оставляем, прокси не ставим вовсе.
+                    cmd += ["--retries", "10", "--fragment-retries", "10",
+                            "--retry-sleep", "linear=1:10"]
                 else:
                     _proxy = _yt_proxy()
                     if _proxy:
@@ -3540,7 +3609,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("channel announce err: %s" % str(e)[:150])
 
     def _announce_tg_cmd(self, msg, text):
-        """Команда из Telegram объявляется в канале: «Гость запросил: радио ремикс FM»."""
+        """Команда из Telegram объявляется в канале: «Кирилл запросил: радио ремикс FM»."""
         try:
             if not self._is_known_cmd(text):
                 return
@@ -4417,7 +4486,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             if sp:
                 name = self._tt_field(sp, "szServerName")
                 if name:
-                    return name
+                    return _clean_server_name(name)
         except Exception:
             pass
         return "TeamTalk"
@@ -4469,8 +4538,9 @@ class MusicBot(TeamTalk5.TeamTalk):
                 text = "%s %s сервер %s" % (nick, "покинула" if female else "покинул", self._server_name())
             if TG_NOTIFY_CHAT_ID:
                 self._tg_send_notify(text, TG_NOTIFY_CHAT_ID)
-            for cid in list(self.sub_active):
-                self._tg_send_notify(text, int(cid))
+            if TG_JOIN_TO_SUBS:
+                for cid in list(self.sub_active):
+                    self._tg_send_notify(text, int(cid))
         except Exception as e:
             log("notify join/leave err: %s" % str(e)[:150])
 
@@ -4674,7 +4744,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         """Озвучить приветствие текущим голосом прямо в канал."""
         try:
             text = (WELCOME_VOICE_TEXT or "Привет, {nick}! Добро пожаловать на сервер {server}.").format(
-                nick="друг", server=self._server_name() or "сервер")
+                nick="Кирилл", server=self._server_name() or "сервер",
+                ip="192.0.2.1", geo="Краснодар (Россия), провайдер SM Ltd")
             self._greet_voice_worker(text)
         except Exception as e:
             log("voice test err: %s" % str(e)[:150])
@@ -4713,7 +4784,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("greet wav err: %s" % str(e)[:120])
             return None
 
-    def _greet_voice(self, nick):
+    def _greet_voice(self, nick, ip=""):
         """Озвучить приветствие. Не чаще WELCOME_VOICE_COOLDOWN на человека."""
         if not WELCOME_VOICE_ENABLED or not WELCOME_VOICE_TEXT:
             return
@@ -4727,7 +4798,15 @@ class MusicBot(TeamTalk5.TeamTalk):
                 if len(self._greet_seen) > 500:
                     self._greet_seen.clear()
                     self._greet_seen[key] = now
-            text = WELCOME_VOICE_TEXT.format(nick=nick, server=self._server_name() or "сервер")
+            _geo = ""
+            try:
+                _geo = self._ip_geo(ip) if ip else ""
+            except Exception:
+                _geo = ""
+            text = WELCOME_VOICE_TEXT.format(
+                nick=nick, server=self._server_name() or "сервер",
+                ip=ip or "неизвестный адрес",
+                geo=_geo or "неизвестное место")
             threading.Thread(target=self._greet_voice_worker, args=(text,), daemon=True).start()
         except Exception as e:
             log("greet voice err: %s" % str(e)[:150])
@@ -4832,7 +4911,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 return  # исключение: сетевое приветствие этому не шлём
             ip = self._tt_field(user, "szIPAddress") or ""
             threading.Thread(target=self._welcome_do, args=(nick, ip), daemon=True).start()
-            self._greet_voice(nick)
+            self._greet_voice(nick, ip)
         except Exception as e:
             log("welcome join err: %s" % str(e)[:150])
 
@@ -4843,6 +4922,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         try:
             geo = self._ip_geo(ip)
             text = "%s, здравствуйте. Добро пожаловать на сервер %s." % (nick, self._server_name())
+            if ip:
+                text += " IP: %s." % ip
             if geo:
                 text += "\n%s" % geo
             if WELCOME_TEXT_ENABLED:
@@ -4968,7 +5049,7 @@ class MusicBot(TeamTalk5.TeamTalk):
     @staticmethod
     def _nick_wl(nl, pref):
         """Ник в белом списке: точное совпадение или префикс до границы слова
-        (пробел/дефис/скобки), чтобы «nick» не пускал «nick_bot»."""
+        (пробел/дефис/скобки), чтобы «kirill» не пускал «kirill_bot»."""
         if nl == pref:
             return True
         if not nl.startswith(pref):
@@ -5677,7 +5758,8 @@ def main():
     log("starting music bot for %s:%d (user %s)" % (HOST, TCP_PORT, USERNAME))
     _start_nightly_restart()
     _start_ydlp_updater()
-    if REG_ENABLED and REG_TOKEN and REG_ADMIN_USER_IDS:
+    if REG_ENABLED and REG_TOKEN and REG_ADMIN_USER_IDS \
+            and os.environ.get("TT_REGISTRAR", "") != "service":
         try:
             import tt_register
             bot._registrar = tt_register.start({

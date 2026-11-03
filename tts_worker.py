@@ -33,13 +33,62 @@ EN_SPEAKER_DEFAULT = os.environ.get("TTS_EN_SPEAKER", "en_21").strip() or "en_21
 RU_MODEL = ("ru", "v4_ru")
 EN_MODEL = ("en", "v3_en")
 
+
+# ---- Яндекс SpeechKit: голос Алисы и другие голоса Яндекса ----
+# Голос выбирается именем "ya:<voice>", например "ya:alena".
+YA_URL = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
+YA_KEY_FILE = os.environ.get("YANDEX_TTS_KEY_FILE") or os.path.join(BASE, ".secrets", "yandex_tts.key")
+
+
+def _ya_key():
+    k = os.environ.get("YANDEX_TTS_KEY", "").strip()
+    if k:
+        return k
+    try:
+        with open(YA_KEY_FILE, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _ya_pcm(text, voice):
+    """Синтез через SpeechKit: s16le, RATE Гц, стерео — как у Silero."""
+    import urllib.parse
+    import urllib.request
+    import urllib.error
+    import numpy as _np
+    key = _ya_key()
+    if not key:
+        raise RuntimeError("нет ключа SpeechKit в .secrets/yandex_tts.key")
+    body = urllib.parse.urlencode({
+        "text": text,
+        "lang": "ru-RU",
+        "voice": voice,
+        "speed": os.environ.get("YANDEX_TTS_SPEED", "1.0"),
+        "format": "lpcm",
+        "sampleRateHertz": str(RATE),
+    }).encode("utf-8")
+    req = urllib.request.Request(YA_URL, data=body, headers={"Authorization": "Api-Key " + key})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            raw = r.read()
+    except urllib.error.HTTPError as e:  # noqa: BLE001 - показать тело ошибки
+        detail = e.read()[:300].decode("utf-8", "replace").replace("\n", " ")
+        raise RuntimeError("SpeechKit HTTP %s: %s" % (e.code, detail))
+    if len(raw) < 1000:
+        raise RuntimeError("короткий ответ SpeechKit: %d байт" % len(raw))
+    if CHANNELS == 2:
+        raw = _np.repeat(_np.frombuffer(raw, dtype="<i2"), 2).tobytes()
+    return raw
+
+
 _models = {"ru": None, "en": None}
 _en_speaker = None
 _lock = threading.Lock()
 
 
 def _key(speaker, en_speaker, text):
-    return hashlib.sha1(("%s|%s|%s" % (speaker, en_speaker or "", text)).encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha1(("n2|%s|%s|%s" % (speaker, en_speaker or "", text)).encode("utf-8")).hexdigest()[:16]
 
 
 def _load(lang):
@@ -116,6 +165,127 @@ def split_segments(text):
     return [(lang, chunk) for lang, chunk in out if chunk.strip()]
 
 
+
+# ---------------------------------------------------------------------------
+# Числительные словами. Silero v4_ru и v3_en не читают цифры: "Сейчас 12
+# часов 30 минут" звучало как "Сейчас часов минут" (проверено по длительности:
+# 4.4 с против 5.2 с у варианта словами). Поэтому перед синтезом числа
+# заменяются словами на языке того куска, в котором стоят.
+# ---------------------------------------------------------------------------
+RU_NUM_WORDS = [
+    'ноль', 'один', 'два', 'три', 'четыре', 'пять', 'шесть', 'семь', 'восемь', 'девять',
+    'десять', 'одиннадцать', 'двенадцать', 'тринадцать', 'четырнадцать', 'пятнадцать',
+    'шестнадцать', 'семнадцать', 'восемнадцать', 'девятнадцать',
+]
+RU_TENS = ['', '', 'двадцать', 'тридцать', 'сорок', 'пятьдесят', 'шестьдесят',
+           'семьдесят', 'восемьдесят', 'девяносто']
+RU_HUNDREDS = ['', 'сто', 'двести', 'триста', 'четыреста', 'пятьсот', 'шестьсот',
+               'семьсот', 'восемьсот', 'девятьсот']
+RU_FEM = {'один': 'одна', 'два': 'две'}
+
+EN_NUM_WORDS = [
+    'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
+    'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen',
+    'seventeen', 'eighteen', 'nineteen',
+]
+EN_TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy',
+           'eighty', 'ninety']
+
+
+def _ru_plural(n, one, few, many):
+    n = abs(int(n)) % 100
+    if 11 <= n <= 19:
+        return many
+    n %= 10
+    if n == 1:
+        return one
+    if 2 <= n <= 4:
+        return few
+    return many
+
+
+def _ru_triple(n, fem=False):
+    words = []
+    h, rem = divmod(n, 100)
+    if h:
+        words.append(RU_HUNDREDS[h])
+    if rem < 20:
+        if rem:
+            w = RU_NUM_WORDS[rem]
+            words.append(RU_FEM.get(w, w) if fem else w)
+    else:
+        words.append(RU_TENS[rem // 10])
+        u = rem % 10
+        if u:
+            w = RU_NUM_WORDS[u]
+            words.append(RU_FEM.get(w, w) if fem else w)
+    return words
+
+
+def ru_number(n, fem_units=False):
+    n = int(n)
+    if n == 0:
+        return ['ноль']
+    out = []
+    millions, rest = divmod(n, 1000000)
+    thousands, units = divmod(rest, 1000)
+    if millions:
+        out += _ru_triple(millions)
+        out.append(_ru_plural(millions, 'миллион', 'миллиона', 'миллионов'))
+    if thousands:
+        out += _ru_triple(thousands, fem=True)
+        out.append(_ru_plural(thousands, 'тысяча', 'тысячи', 'тысяч'))
+    if units:
+        out += _ru_triple(units, fem=fem_units)
+    return out
+
+
+def _en_triple(n):
+    words = []
+    h, rem = divmod(n, 100)
+    if h:
+        words += [EN_NUM_WORDS[h], 'hundred']
+    if rem < 20:
+        if rem:
+            words.append(EN_NUM_WORDS[rem])
+    else:
+        words.append(EN_TENS[rem // 10])
+        if rem % 10:
+            words.append(EN_NUM_WORDS[rem % 10])
+    return words
+
+
+def en_number(n):
+    n = int(n)
+    if n == 0:
+        return ['zero']
+    out = []
+    millions, rest = divmod(n, 1000000)
+    thousands, units = divmod(rest, 1000)
+    if millions:
+        out += _en_triple(millions) + ['million']
+    if thousands:
+        out += _en_triple(thousands) + ['thousand']
+    if units:
+        out += _en_triple(units)
+    return out
+
+
+def spell_numbers(text, lang):
+    """Заменить группы цифр словами на языке куска."""
+    def rep(m):
+        try:
+            value = int(m.group(0))
+        except Exception:  # noqa: BLE001
+            return m.group(0)
+        # «1 минута» -> «одна минута»: женский род, если дальше женское слово
+        fem = bool(re.match(r'\s+(минут|секунд|тысяч)', text[m.end():] or ''))
+        words = ru_number(value, fem_units=fem) if lang == 'ru' else en_number(value)
+        return ' '.join(words)
+
+    return re.sub(r'\d+', rep, text)
+
+
 def _tts_pcm(model, lang, text, speaker, en_speaker=None):
     """Один кусок -> сырой PCM s16le."""
     import numpy as np
@@ -139,7 +309,24 @@ def synth(text, speaker, en_speaker=None):
     raw = os.path.join(CACHE, "greet_%s.raw" % _key(speaker, en_speaker, text))
     if os.path.exists(raw) and os.path.getsize(raw) > 1000:
         return raw
-    segs = split_segments(text)
+    if speaker.startswith("ya:"):
+        try:
+            data = _ya_pcm(spell_numbers(text, "ru"), speaker[3:].strip() or "alena")
+            tmp = "%s.%d.%d.tmp" % (raw, os.getpid(), threading.get_ident())
+            with open(tmp, "wb") as f:
+                f.write(data)
+            os.replace(tmp, raw)
+            dur = len(data) / float(RATE * CHANNELS * 2)
+            print("tts worker: Яндекс (%s): %d симв. -> %.1f с" % (speaker[3:], len(text), dur), flush=True)
+            return raw
+        except Exception as e:  # noqa: BLE001
+            fb = os.environ.get("TTS_FALLBACK_SPEAKER", "xenia").strip() or "xenia"
+            print("tts worker: Яндекс не сработал (%s) — синтез через Silero (%s)" % (str(e)[:180], fb), flush=True)
+            speaker = fb
+            # кэш должен соответствовать реальному голосу, иначе Алиса
+            # потом возьмёт файл, озвученный Silero
+            raw = os.path.join(CACHE, "greet_%s.raw" % _key(fb, en_speaker, text))
+    segs = [(lang, spell_numbers(chunk, lang)) for lang, chunk in split_segments(text)]
     if not segs:
         raise RuntimeError("пустой текст")
     needs = set(lang for lang, _ in segs)
