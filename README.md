@@ -179,7 +179,7 @@ loginctl enable-linger $(id -un)        # работа сервиса после
 ## Изменения
 
 ### RuTube
-- Браузерные заголовки (User-Agent, Accept-Language), `extractor_retries` 8, `socket_timeout` 20.
+- Браузерный `User-Agent` и `--extractor-retries`: без них первый же обрыв убивал попытку.
 - `--impersonate chrome`: подмена TLS-отпечатка через curl_cffi. Без него антибот Qrator рвёт соединение (`Connection reset by peer`, `UNEXPECTED_EOF_WHILE_READING`).
 - Прямое воспроизведение без скачивания для ссылок `rutube.ru`: плагин спрашивает адрес HLS и играет потоком, файл в кэш не пишется.
 
