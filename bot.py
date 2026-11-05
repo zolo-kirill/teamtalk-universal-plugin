@@ -201,7 +201,7 @@ def _tg_urlopen(req, timeout):
 
 # ---- признаки ботнет-клиентов (массовые входы «мёртвых» ботов) ----
 # Флуд-ники вида «🤖 Shadow_Pilot_46»: эмодзи + латинское слово_слово_число.
-# Кириллические ники и одиночные подчёркивания («kirill_mobile») не трогаем.
+# Кириллические ники и одиночные подчёркивания («ivan_mobile») не трогаем.
 _EMOJI_RE = re.compile(
     "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF\U00002190-\U000021FF\U0000FE0F\U00002300-\U000023FF]"
 )
@@ -879,6 +879,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         if TG_MUSIC_TOKEN:
             threading.Thread(target=self._music_poll, daemon=True, name="music-poll").start()
             log("music telegram bot enabled")
+        threading.Thread(target=self._cmd_watch, daemon=True, name="cmd-watch").start()
 
     def _load_channel_msg(self):
         try:
@@ -1216,7 +1217,7 @@ class MusicBot(TeamTalk5.TeamTalk):
                 ptext, pkb = self._player_view()
                 self._tg_send_kb(cid, ptext, pkb)
                 return
-            if low in ("/voice", "/голос", "voice", "голос") or low.startswith(("/voice ", "/голос ")):
+            if low in ("/tts", "/tts", "voice", "голос") or low.startswith(("/tts ", "/tts ")):
                 arg = text.split(" ", 1)[1].strip().lower() if " " in text else ""
                 if arg:
                     if self._set_welcome_voice(arg):
@@ -1984,7 +1985,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             {"command": "unban", "description": "Разблокировать: /unban"},
             {"command": "net", "description": "Сетевое сообщение всем: /net <текст>"},
             {"command": "panel", "description": "Пульт: пауза, трек, громкость"},
-            {"command": "voice", "description": "Голос приветствия: выбор или /voice <имя>"},
+            {"command": "voice", "description": "Голос приветствия: выбор или /tts <имя>"},
         ]
         try:
             # общее меню по умолчанию — без админских команд
@@ -3143,9 +3144,59 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._start_voice(self.current_orig, self.cur_offset_ms)
         self._send("Воспроизведение продолжено (%s)" % _fmt_ms(self.cur_offset_ms))
 
+    def _save_all(self):
+        """Полное сохранение всех настроек: config.json плюс файлы состояния.
+
+        Пишет всё, что бот держит в памяти: ник, сервис, громкость, озвучку
+        приветствия и голос, сообщения в канал, озвучку названий, статус.
+        После перезапуска бот поднимается с этим же состоянием.
+        """
+        _save_config({
+            "server": {"nickname": self.nickname},
+            "runtime": {"main_service": self.service},
+            "playback": {"default_volume": int(self.volume)},
+            "welcome": {
+                "voice_enabled": bool(WELCOME_VOICE_ENABLED),
+                "voice_speaker": WELCOME_VOICE_SPEAKER,
+            },
+            "music": {"voice_announce": bool(self.voice_announce)},
+        })
+        try:
+            with open(STATUS_MSG_FILE, "w") as f:
+                f.write(self.status_msg or "")
+        except Exception as e:
+            log("status save err: %s" % e)
+        self._save_channel_msg()
+        self._save_voice_announce()
+        return {
+            "nick": self.nickname,
+            "service": self.service,
+            "volume": int(self.volume),
+            "tts": bool(WELCOME_VOICE_ENABLED),
+            "speaker": WELCOME_VOICE_SPEAKER,
+            "channel_msg": bool(self.channel_msg),
+            "voice_announce": bool(self.voice_announce),
+            "status": self.status_msg or "",
+        }
+
+    def _save_runtime(self):
+        """Автосохранение настроек команд: источник и громкость.
+
+        Вызывается сразу после смены значения, чтобы после перезапуска
+        бот поднялся с теми же настройками, без ручного /sc.
+        """
+        try:
+            _save_config({
+                "runtime": {"main_service": self.service},
+                "playback": {"default_volume": int(self.volume)},
+            })
+        except Exception as e:
+            log("runtime save err: %s" % str(e)[:120])
+
     def _set_volume(self, v):
         v = max(1, min(MAX_VOLUME, v))
         self.volume = v
+        self._save_runtime()
         # No ffmpeg restart needed: _scale_pcm applies the new gain to the next
         # audio block, so volume changes take effect instantly for any source.
         self._send("Громкость: %d%%" % v)
@@ -3609,7 +3660,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("channel announce err: %s" % str(e)[:150])
 
     def _announce_tg_cmd(self, msg, text):
-        """Команда из Telegram объявляется в канале: «Кирилл запросил: радио ремикс FM»."""
+        """Команда из Telegram объявляется в канале: «Иван запросил: радио ремикс FM»."""
         try:
             if not self._is_known_cmd(text):
                 return
@@ -3682,6 +3733,15 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._send("Сообщения в канал: %s." % ("включены" if self.channel_msg else "выключены"))
             return
 
+        # --- озвучка приветствия синтезатором: tts on / tts off ---
+        _cl = cmd.lower()
+        if _cl == "tts" or _cl.startswith("tts "):
+            _rest = cmd.split(None, 1)[1].strip() if " " in cmd else ""
+            _m = {"on": "вкл", "off": "выкл", "1": "вкл", "0": "выкл",
+                  "да": "вкл", "нет": "выкл", "true": "вкл", "false": "выкл"}
+            self._cmd_welcome_voice(_m.get(_cl.split(None, 1)[1].strip() if " " in _cl else "", _rest))
+            return
+
         # --- озвучка названия трека: vo — вкл/выкл ---
         if cmd == "vo":
             self.voice_announce = not self.voice_announce
@@ -3727,19 +3787,22 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._send("Сервис: Яндекс.Музыка.")
             else:
                 self._send("Сервис «%s» не распознан. Доступно: yt (YouTube), ym (Яндекс.Музыка)." % svc)
+            self._save_runtime()
             return
 
         # --- сохранить настройки сессии в config.json: sc ---
         if cmd in ("sc", "save"):
             svc = {"yt": "YouTube", "ym": "Яндекс.Музыка"}.get(self.service, self.service)
             try:
-                _save_config({
-                    "server": {"nickname": self.nickname},
-                    "runtime": {"main_service": self.service},
-                    "playback": {"default_volume": int(self.volume)},
-                })
-                self._send("Настройки сохранены: ник «%s», сервис %s, громкость %d."
-                           % (self.nickname, svc, self.volume))
+                st = self._save_all()
+                self._send("Сохранено полностью: ник «%s», сервис %s, громкость %d, "
+                           "озвучка приветствия %s (%s), сообщения в канал %s, "
+                           "озвучка названий %s, статус %s."
+                           % (st["nick"], svc, st["volume"],
+                              "вкл" if st["tts"] else "выкл", st["speaker"],
+                              "вкл" if st["channel_msg"] else "выкл",
+                              "вкл" if st["voice_announce"] else "выкл",
+                              ("«%s»" % st["status"]) if st["status"] else "пуст"))
             except Exception as e:
                 log("sc save err: %s" % e)
                 self._send("Не удалось сохранить настройки: %s" % e)
@@ -4726,6 +4789,89 @@ class MusicBot(TeamTalk5.TeamTalk):
                    {"text": "\U0001f504 Обновить", "callback_data": "voice:list"}])
         return "\n".join(lines), kb
 
+    # --- команды от Telegram-бота провижинера -------------------------
+    def _voice_cmd_file(self):
+        return os.path.join(BASE_DIR, "voice_cmd.json")
+
+    def _cmd_watch(self):
+        """Смена голоса и прослушивание из бота провижинера.
+
+        Провижинер кладёт рядом с ботом voice_cmd.json:
+        {"speaker": "ya:jane", "say": "текст"} — голос меняется на лету,
+        а если пришёл "say" или "test", фраза сразу звучит в канале.
+        Файл удаляем до обработки, чтобы фраза не прозвучала дважды.
+        """
+        path = self._voice_cmd_file()
+        while True:
+            try:
+                time.sleep(2)
+                if not os.path.isfile(path):
+                    continue
+                cmd = None
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        cmd = json.load(f)
+                except Exception as e:
+                    log("voice cmd read err: %s" % str(e)[:120])
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+                if not isinstance(cmd, dict):
+                    continue
+                spk = str(cmd.get("speaker") or "").strip().lower()
+                if spk and self._set_welcome_voice(spk):
+                    log("voice cmd: голос -> %s" % spk)
+                say = str(cmd.get("say") or "").strip()
+                if "voice_enabled" in cmd:
+                    globals()["WELCOME_VOICE_ENABLED"] = bool(cmd["voice_enabled"])
+                    log("voice cmd: приветствие голосом -> %s" % bool(cmd["voice_enabled"]))
+                if say or cmd.get("test"):
+                    threading.Thread(target=self._voice_say, args=(say or None,),
+                                     daemon=True).start()
+            except Exception as e:
+                log("voice cmd err: %s" % str(e)[:150])
+
+    def _voice_say(self, text=None):
+        """Озвучить фразу текущим голосом прямо в канал."""
+        try:
+            if not text:
+                text = (WELCOME_VOICE_TEXT or "Привет, {nick}! Добро пожаловать на сервер {server}.").format(
+                    nick="Иван", server=self._server_name() or "сервер", ip="", geo="")
+            log("voice say: %s" % text[:60])
+            self._greet_voice_worker(text)
+        except Exception as e:
+            log("voice say err: %s" % str(e)[:150])
+
+    def _cmd_welcome_voice(self, arg):
+        """Голосовое приветствие из TeamTalk и Telegram.
+
+        Без аргумента — переключает вкл/выкл. С аргументом вкл/выкл/on/off —
+        ставит нужное состояние. С именем голоса — меняет голос.
+        """
+        arg = (arg or "").strip().lower()
+        offs = ("off", "выкл", "0", "нет", "disable")
+        ons = ("on", "вкл", "1", "да", "enable")
+        if not arg or arg in ons or arg in offs:
+            if not arg:
+                new = not bool(WELCOME_VOICE_ENABLED)
+            else:
+                new = arg in ons
+            try:
+                _save_config({"welcome": {"voice_enabled": bool(new)}})
+            except Exception as e:
+                self._send("Не удалось сохранить: %s" % str(e)[:80])
+                return
+            globals()["WELCOME_VOICE_ENABLED"] = bool(new)
+            log("welcome voice_enabled -> %s" % new)
+            self._send("Голосовое приветствие: %s." % ("включено" if new else "выключено"))
+            return
+        if self._set_welcome_voice(arg):
+            self._send("Голос приветствия: %s." % WELCOME_VOICE_LABELS.get(arg, arg))
+            return
+        self._send("Такого голоса нет: %s. Доступно: %s." % (
+            arg, ", ".join(WELCOME_VOICE_LABELS.get(v, v) for v in WELCOME_VOICES)))
+
     def _set_welcome_voice(self, name):
         """Сменить голос приветствия: config.json + сразу в работу."""
         name = (name or "").strip().lower()
@@ -4744,8 +4890,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         """Озвучить приветствие текущим голосом прямо в канал."""
         try:
             text = (WELCOME_VOICE_TEXT or "Привет, {nick}! Добро пожаловать на сервер {server}.").format(
-                nick="Кирилл", server=self._server_name() or "сервер",
-                ip="192.0.2.1", geo="Краснодар (Россия), провайдер SM Ltd")
+                nick="Иван", server=self._server_name() or "сервер",
+                ip="192.0.2.1", geo="Москва (Россия), провайдер Example")
             self._greet_voice_worker(text)
         except Exception as e:
             log("voice test err: %s" % str(e)[:150])
@@ -5049,7 +5195,7 @@ class MusicBot(TeamTalk5.TeamTalk):
     @staticmethod
     def _nick_wl(nl, pref):
         """Ник в белом списке: точное совпадение или префикс до границы слова
-        (пробел/дефис/скобки), чтобы «kirill» не пускал «kirill_bot»."""
+        (пробел/дефис/скобки), чтобы «ivan» не пускал «ivan_bot»."""
         if nl == pref:
             return True
         if not nl.startswith(pref):
