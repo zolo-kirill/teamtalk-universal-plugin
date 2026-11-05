@@ -201,7 +201,7 @@ def _tg_urlopen(req, timeout):
 
 # ---- признаки ботнет-клиентов (массовые входы «мёртвых» ботов) ----
 # Флуд-ники вида «🤖 Shadow_Pilot_46»: эмодзи + латинское слово_слово_число.
-# Кириллические ники и одиночные подчёркивания («ivan_mobile») не трогаем.
+# Кириллические ники и одиночные подчёркивания («kirill_mobile») не трогаем.
 _EMOJI_RE = re.compile(
     "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF\U00002190-\U000021FF\U0000FE0F\U00002300-\U000023FF]"
 )
@@ -2571,6 +2571,11 @@ class MusicBot(TeamTalk5.TeamTalk):
             # её надо получать заново
             self._remember_last(url, note, True)
             return
+        if self._is_yt_live_url(url):
+            self._send("Открываю трансляцию YouTube…")
+            threading.Thread(target=self._play_yt_stream,
+                             args=(url, label), daemon=True).start()
+            return
         if self._is_live_stream(url):
             self._play_radio(url, label)
             return
@@ -2579,6 +2584,50 @@ class MusicBot(TeamTalk5.TeamTalk):
             threading.Thread(target=self._playlist_worker, args=(url,), daemon=True).start()
             return
         self._switch_to(url, label)
+
+    def _is_yt_live_url(self, url):
+        """YouTube-трансляция: её нельзя скачивать, только играть потоком."""
+        low = (url or "").lower()
+        return ("youtube.com/live/" in low) or ("youtube.com/watch" in low and "live=1" in low)
+
+    def _play_yt_stream(self, url, label):
+        """YouTube live без скачивания: прямой адрес потока -> эфир."""
+        ck = None
+        try:
+            log("yt live: получаю прямой адрес для %s" % label)
+            cmd = list(YTDLP) + [
+                "--no-playlist", "-g",
+                "-f", "ba/b",
+                "--impersonate", "chrome",
+                "--socket-timeout", "20", "--extractor-retries", "8",
+                "--remote-components", "ejs:github",
+            ]
+            if YT_JS_RUNTIME:
+                cmd += ["--js-runtimes", "deno:%s" % YT_JS_RUNTIME]
+            if YT_PO_TOKEN:
+                cmd += ["--extractor-args", YT_PO_TOKEN]
+            _proxy = _yt_proxy()
+            if _proxy:
+                cmd += ["--proxy", _proxy]
+            ck = _fresh_cookies(COOKIES)
+            if ck:
+                cmd += ["--cookies", ck]
+            cmd += ["--", url]
+            rc, out, err = self._run_ydl(cmd, timeout=150)
+            lines = [l.strip() for l in (out or "").splitlines() if l.strip().startswith("http")]
+            if rc != 0 or not lines:
+                log("yt live: адрес не получен (%s), качаю как раньше" % str(err or "")[:150])
+                self._download_worker(url, label)
+                return
+            stream = lines[-1]
+            log("yt live: адрес получен (%d симв.), играю напрямую" % len(stream))
+            self.stream_http_proxy = os.environ.get("TT_STREAM_HTTP_PROXY") or "http://127.0.0.1:8118"
+            self._play_radio(stream, label)
+        except Exception as e:
+            log("yt live err: %s" % str(e)[:150])
+        finally:
+            if ck:
+                _drop_cookies(ck)
 
     def _play_rutube_stream(self, url, label):
         """RuTube без скачивания: прямой адрес потока -> эфир."""
@@ -2797,11 +2846,16 @@ class MusicBot(TeamTalk5.TeamTalk):
         pulse = PULSE_SINK
         cap = None  # parec process (pulse mode only)
         try:
+            spp = getattr(self, "stream_http_proxy", None) if str(path).startswith(("http://", "https://")) else None
             if pulse:
                 cmd = ["ffmpeg", "-y"]
                 if offset_ms > 0:
                     cmd += ["-ss", "%.3f" % (offset_ms / 1000.0)]
-                cmd += ["-re", "-i", path, "-vn", "-f", "pulse", pulse]
+                if spp:
+                    cmd += ["-http_proxy", spp, "-rw_timeout", "15000000"]
+                else:
+                    cmd += ["-re"]
+                cmd += ["-i", path, "-vn", "-f", "pulse", pulse]
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     start_new_session=True, env=_media_env(),
@@ -2817,6 +2871,8 @@ class MusicBot(TeamTalk5.TeamTalk):
                 cmd = ["ffmpeg", "-y"]
                 if offset_ms > 0:
                     cmd += ["-ss", "%.3f" % (offset_ms / 1000.0)]
+                if spp:
+                    cmd += ["-http_proxy", spp, "-rw_timeout", "15000000"]
                 cmd += ["-i", path, "-vn", "-f", "s16le", "-ac", str(VOICE_CHANNELS),
                         "-ar", str(VOICE_RATE), "-"]
                 proc = subprocess.Popen(
@@ -3660,7 +3716,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("channel announce err: %s" % str(e)[:150])
 
     def _announce_tg_cmd(self, msg, text):
-        """Команда из Telegram объявляется в канале: «Иван запросил: радио ремикс FM»."""
+        """Команда из Telegram объявляется в канале: «Кирилл запросил: радио ремикс FM»."""
         try:
             if not self._is_known_cmd(text):
                 return
@@ -4837,7 +4893,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         try:
             if not text:
                 text = (WELCOME_VOICE_TEXT or "Привет, {nick}! Добро пожаловать на сервер {server}.").format(
-                    nick="Иван", server=self._server_name() or "сервер", ip="", geo="")
+                    nick="Кирилл", server=self._server_name() or "сервер", ip="", geo="")
             log("voice say: %s" % text[:60])
             self._greet_voice_worker(text)
         except Exception as e:
@@ -4890,8 +4946,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         """Озвучить приветствие текущим голосом прямо в канал."""
         try:
             text = (WELCOME_VOICE_TEXT or "Привет, {nick}! Добро пожаловать на сервер {server}.").format(
-                nick="Иван", server=self._server_name() or "сервер",
-                ip="192.0.2.1", geo="Москва (Россия), провайдер Example")
+                nick="Кирилл", server=self._server_name() or "сервер",
+                ip="192.0.2.1", geo="Краснодар (Россия), провайдер SM Ltd")
             self._greet_voice_worker(text)
         except Exception as e:
             log("voice test err: %s" % str(e)[:150])
@@ -5068,12 +5124,11 @@ class MusicBot(TeamTalk5.TeamTalk):
         try:
             geo = self._ip_geo(ip)
             text = "%s, здравствуйте. Добро пожаловать на сервер %s." % (nick, self._server_name())
-            if ip:
-                text += " IP: %s." % ip
+            # IP в сетевое сообщение не пишем: только город и провайдер
             if geo:
                 text += "\n%s" % geo
-            if WELCOME_TEXT_ENABLED:
-                text += "\n%s" % (WELCOME_RULES or "Ознакомьтесь, пожалуйста, с правилами сервера.")
+            # Правила и ссылку к приветствию не приклеиваем: текст длиннее
+            # одного сообщения TeamTalk и хвост уходил огрызком.
             self._send_network_msg(text)
         except Exception as e:
             log("welcome do err: %s" % str(e)[:150])
@@ -5195,7 +5250,7 @@ class MusicBot(TeamTalk5.TeamTalk):
     @staticmethod
     def _nick_wl(nl, pref):
         """Ник в белом списке: точное совпадение или префикс до границы слова
-        (пробел/дефис/скобки), чтобы «ivan» не пускал «ivan_bot»."""
+        (пробел/дефис/скобки), чтобы «kirill» не пускал «kirill_bot»."""
         if nl == pref:
             return True
         if not nl.startswith(pref):
