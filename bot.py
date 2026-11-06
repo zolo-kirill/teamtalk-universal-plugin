@@ -466,16 +466,12 @@ WELCOME_VOICE_SPEAKER = str(_cfg("welcome.voice_speaker", None, "baya") or "baya
 WELCOME_VOICE_BILINGUAL = bool(_cfg("welcome.voice_bilingual", None, True))
 WELCOME_EN_SPEAKER = str(_cfg("welcome.voice_en_speaker", None, "en_21") or "en_21").strip()
 
+if WELCOME_VOICE_SPEAKER not in ("baya", "kseniya", "xenia", "eugene", "aidar"):
+    WELCOME_VOICE_SPEAKER = "baya"
+
 # Голоса Silero v4_ru, доступные для выбора из Telegram
-WELCOME_VOICES = ("ya:alena", "ya:filipp", "ya:jane", "ya:zahar", "ya:omazh", "ya:ermil",
-                  "baya", "kseniya", "xenia", "eugene", "aidar")
+WELCOME_VOICES = ("baya", "kseniya", "xenia", "eugene", "aidar")
 WELCOME_VOICE_LABELS = {
-    "ya:alena": "Алиса (Яндекс)",
-    "ya:filipp": "Филипп (Яндекс)",
-    "ya:jane": "Джейн (Яндекс)",
-    "ya:zahar": "Захар (Яндекс)",
-    "ya:omazh": "Омаж (Яндекс)",
-    "ya:ermil": "Ермил (Яндекс)",
     "baya": "Бая (жен)",
     "kseniya": "Ксения (жен)",
     "xenia": "Ксения-2 (жен)",
@@ -4853,7 +4849,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         """Смена голоса и прослушивание из бота провижинера.
 
         Провижинер кладёт рядом с ботом voice_cmd.json:
-        {"speaker": "ya:jane", "say": "текст"} — голос меняется на лету,
+        {"speaker": "baya", "say": "текст"} — голос меняется на лету,
         а если пришёл "say" или "test", фраза сразу звучит в канале.
         Файл удаляем до обработки, чтобы фраза не прозвучала дважды.
         """

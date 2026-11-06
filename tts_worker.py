@@ -34,54 +34,6 @@ RU_MODEL = ("ru", "v4_ru")
 EN_MODEL = ("en", "v3_en")
 
 
-# ---- Яндекс SpeechKit: голос Алисы и другие голоса Яндекса ----
-# Голос выбирается именем "ya:<voice>", например "ya:alena".
-YA_URL = "https://tts.api.cloud.yandex.net/speech/v1/tts:synthesize"
-YA_KEY_FILE = os.environ.get("YANDEX_TTS_KEY_FILE") or os.path.join(BASE, ".secrets", "yandex_tts.key")
-
-
-def _ya_key():
-    k = os.environ.get("YANDEX_TTS_KEY", "").strip()
-    if k:
-        return k
-    try:
-        with open(YA_KEY_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    except Exception:
-        return ""
-
-
-def _ya_pcm(text, voice):
-    """Синтез через SpeechKit: s16le, RATE Гц, стерео — как у Silero."""
-    import urllib.parse
-    import urllib.request
-    import urllib.error
-    import numpy as _np
-    key = _ya_key()
-    if not key:
-        raise RuntimeError("нет ключа SpeechKit в .secrets/yandex_tts.key")
-    body = urllib.parse.urlencode({
-        "text": text,
-        "lang": "ru-RU",
-        "voice": voice,
-        "speed": os.environ.get("YANDEX_TTS_SPEED", "1.0"),
-        "format": "lpcm",
-        "sampleRateHertz": str(RATE),
-    }).encode("utf-8")
-    req = urllib.request.Request(YA_URL, data=body, headers={"Authorization": "Api-Key " + key})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as r:
-            raw = r.read()
-    except urllib.error.HTTPError as e:  # noqa: BLE001 - показать тело ошибки
-        detail = e.read()[:300].decode("utf-8", "replace").replace("\n", " ")
-        raise RuntimeError("SpeechKit HTTP %s: %s" % (e.code, detail))
-    if len(raw) < 1000:
-        raise RuntimeError("короткий ответ SpeechKit: %d байт" % len(raw))
-    if CHANNELS == 2:
-        raw = _np.repeat(_np.frombuffer(raw, dtype="<i2"), 2).tobytes()
-    return raw
-
-
 _models = {"ru": None, "en": None}
 _en_speaker = None
 _lock = threading.Lock()
@@ -309,23 +261,9 @@ def synth(text, speaker, en_speaker=None):
     raw = os.path.join(CACHE, "greet_%s.raw" % _key(speaker, en_speaker, text))
     if os.path.exists(raw) and os.path.getsize(raw) > 1000:
         return raw
-    if speaker.startswith("ya:"):
-        try:
-            data = _ya_pcm(spell_numbers(text, "ru"), speaker[3:].strip() or "alena")
-            tmp = "%s.%d.%d.tmp" % (raw, os.getpid(), threading.get_ident())
-            with open(tmp, "wb") as f:
-                f.write(data)
-            os.replace(tmp, raw)
-            dur = len(data) / float(RATE * CHANNELS * 2)
-            print("tts worker: Яндекс (%s): %d симв. -> %.1f с" % (speaker[3:], len(text), dur), flush=True)
-            return raw
-        except Exception as e:  # noqa: BLE001
-            fb = os.environ.get("TTS_FALLBACK_SPEAKER", "xenia").strip() or "xenia"
-            print("tts worker: Яндекс не сработал (%s) — синтез через Silero (%s)" % (str(e)[:180], fb), flush=True)
-            speaker = fb
-            # кэш должен соответствовать реальному голосу, иначе Алиса
-            # потом возьмёт файл, озвученный Silero
-            raw = os.path.join(CACHE, "greet_%s.raw" % _key(fb, en_speaker, text))
+    if speaker.startswith("ya:") or speaker.startswith("yandex:"):
+        # голоса Яндекса больше не поддерживаются
+        speaker = "baya"
     segs = [(lang, spell_numbers(chunk, lang)) for lang, chunk in split_segments(text)]
     if not segs:
         raise RuntimeError("пустой текст")
