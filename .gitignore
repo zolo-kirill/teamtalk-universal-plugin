@@ -1,45 +1,6 @@
-# Секреты — никогда не коммитить
-.secrets/
-*.env
-yt_cookies.txt
-rutube_cookies.txt
-
-# Python
 __pycache__/
 *.pyc
-.venv/
-
-# Скачанные треки, кэш, входящие файлы
-cache/
-inbox/
-*.mp3
-*.mp4
-*.mp4.part
-*.oga
-*.ogg
-
-# Состояние бота
-.nickname
-
-# Провайдер po-токенов для yt-dlp (не используется)
-bgutil/
-.channel_msg
+.secrets/
 config.json
-
-# Домашний туннель (hometun): приватные ключи и локальные настройки клиента
-hometun/client/config.txt
-*.ppk
-tun_key
-tun_key.pub
-
-# Состояние бота: локальные данные конкретного сервера
-users.db
-bans.json
-favorites.json
-.statusmsg
-.voice_announce
-.ytdlp_update
+tts/voice_cmd.json
 *.bak-*
-
-# Последний проигранный трек (возобновление после рестарта)
-last_played.json
