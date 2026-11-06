@@ -1136,9 +1136,9 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _tg_allowed(self, msg):
         """Владелец из конфига и админы из users.db могут слать команды."""
-        if not TG_OWNER_USER_ID and not self.admins:
-            return True
         ids = self._tg_admin_ids()
+        if not ids:
+            return False
         uid = (msg.get("from") or {}).get("id")
         cid = (msg.get("chat") or {}).get("id")
         return uid in ids or cid in ids
@@ -1267,18 +1267,17 @@ class MusicBot(TeamTalk5.TeamTalk):
         media = msg.get("voice") or msg.get("audio") or msg.get("video") or doc
         if not media:
             return
+        if not self._tg_allowed(msg):
+            log("media from non-admin ignored: %s" % ((msg.get("from") or {}).get("id"),))
+            return
         file_id = media.get("file_id")
         if not file_id:
             return
         # документ-файл с экспортом кук (например, .txt из Get cookies.txt) — принять как вход.
-        # doc выделен отдельно: media уже содержит словарь document, поэтому проверка
-        # типа идёт по msg["document"], а не по ключу внутри media (там его нет).
         if doc is not None:
             path = self._tg_download(file_id)
             if path:
-                # режим приёма кук (владелец отправил /cookies): любой документ трактуем как
-                # экспорт кук, не проигрываем; даже если эвристика по шапке не сработала
-                if self._tg_cookies_mode_active() and self._tg_allowed(msg):
+                if self._tg_cookies_mode_active():
                     try:
                         with open(path, "r", encoding="utf-8", errors="replace") as fh:
                             content = fh.read(200000)
@@ -1303,9 +1302,6 @@ class MusicBot(TeamTalk5.TeamTalk):
                     self._tg_install_yt_cookies(msg, content)
                     return
                 self.api_q.put(("local_file", path, (media.get("file_name") or "audio")[:80]))
-            return
-        if not self._tg_allowed(msg):
-            log("media from non-admin ignored: %s" % ((msg.get("from") or {}).get("id"),))
             return
         is_voice = msg.get("voice") is not None
         title = (
@@ -3677,8 +3673,9 @@ class MusicBot(TeamTalk5.TeamTalk):
         if not t:
             return False
         if t.startswith("/"):
-            t = t[1:]
-        return t.split(None, 1)[0].lower() in self._TG_KNOWN_CMDS
+            t = t[1:].strip()
+        parts = t.split(None, 1)
+        return bool(parts and parts[0].lower() in self._TG_KNOWN_CMDS)
 
     def _tg_cmd_author(self, msg):
         """Имя автора команды из Telegram: first_name + last_name, иначе username."""
@@ -3726,9 +3723,17 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("announce tg cmd err: %s" % str(e)[:150])
 
     def _handle_cmd(self, text, from_user):
-        text = text.strip()
+        text = (text or "").strip()
+        if not text:
+            return
         low = text.lower()
-        cmd = low[1:] if low.startswith("/") else low
+        cmd = low[1:].strip() if low.startswith("/") else low
+        if not cmd:
+            return
+        parts = cmd.split(None, 1)
+        if not parts:
+            return
+        first = parts[0]
         if from_user:
             self.reply_user_id = from_user
         self.silent = False  # explicit command → report status again
@@ -3744,10 +3749,12 @@ class MusicBot(TeamTalk5.TeamTalk):
 
         # --- гейт: служебные команды — только администраторам ---
         # (в TeamTalk админ = USERTYPE_ADMIN; из Telegram сюда попадают уже после _tg_allowed)
-        first = cmd.split(None, 1)[0]
-        admin_only = first in ("rs", "restart", "cn", "cs", "sv", "svc", "cm", "channel", "sc", "save", "login", "cookies")
+        admin_only = first in (
+            "rs", "restart", "cn", "cs", "sv", "svc", "cm", "channel",
+            "sc", "save", "login", "cookies", "as", "tts", "vo"
+        )
         if not admin_only:
-            admin_only = cmd.startswith("lf ")
+            admin_only = first == "lf" or cmd.startswith("lf ")
         if admin_only and not self._is_admin(from_user):
             self._send("Эта команда только для администраторов.")
             return
@@ -3993,11 +4000,19 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._help_cmd()
             return
 
-        # --- локальный файл: lf <путь> (из Telegram-моста) ---
-        if cmd.startswith("lf "):
-            path = text.split(None, 1)[1].strip()
+        # --- локальный файл: lf <путь> (только аудиофайлы) ---
+        if first == "lf":
+            parts = text.split(None, 1)
+            if len(parts) < 2 or not parts[1].strip():
+                self._send("Использование: /lf <путь к аудиофайлу>")
+                return
+            path = os.path.realpath(parts[1].strip())
             if not os.path.isfile(path):
-                self._send("Файл не найден: %s" % path)
+                self._send("Файл не найден: %s" % parts[1].strip())
+                return
+            ext = os.path.splitext(path)[1].lower()
+            if ext not in (".mp3", ".wav", ".ogg", ".flac", ".m4a", ".opus", ".aac", ".wma", ".m3u", ".m3u8"):
+                self._send("Разрешены только аудиофайлы (" + ", ".join((".mp3", ".wav", ".ogg", ".flac", ".m4a", ".opus", ".aac", ".wma", ".m3u", ".m3u8")) + ").")
                 return
             self._play_local(path, os.path.basename(path))
             return
@@ -4026,7 +4041,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             return
 
         # --- плейлист: пл / список / плейлист [<страница>] — полный список ---
-        cmd_first = low.split(None, 1)[0]
+        cmd_first = first
         if cmd_first in ("playlist",):
             parts = text.split(None, 1)
             page = 1
