@@ -1,0 +1,19 @@
+[Unit]
+Description=TeamTalk Universal Plugin (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__INSTANCES__
+Environment=HOME=__HOME__
+Environment=XDG_RUNTIME_DIR=__RUNTIME__
+Environment=PULSE_RUNTIME_PATH=__RUNTIME__/pulse
+Environment=TT_INSTANCES_ROOT=__INSTANCES__
+ExecStart=/bin/bash __DIR__/run.sh --instance %i
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
