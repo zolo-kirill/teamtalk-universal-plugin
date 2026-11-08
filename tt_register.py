@@ -134,6 +134,11 @@ def _urlopen(req, timeout):
     data = req.data
     headers = dict(req.header_items())
     headers.setdefault("Connection", "keep-alive")
+    # urllib не кладёт Content-type в header_items(), а requests без него
+    # отправляет тело как есть: Telegram не разбирает форму и отвечает
+    # "message text is empty". Ставим заголовок сами.
+    if data is not None and not any(k.lower() == "content-type" for k in headers):
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
     for attempt in (1, 2):
         try:
             r = _session().request(req.get_method(), req.full_url, data=data,
@@ -293,21 +298,38 @@ class Registrar(object):
         url = "https://api.telegram.org/bot%s/%s" % (self.token, method)
         data = urllib.parse.urlencode(params).encode()
         req = urllib.request.Request(url, data=data, method="POST")
-        with _urlopen(req, 70) as r:
-            return json.loads(r.read().decode())
+        try:
+            with _urlopen(req, 70) as r:
+                return json.loads(r.read().decode())
+        except Exception as e:
+            body = ""
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                try:
+                    body = (resp.text or "")[:300]
+                except Exception:
+                    body = ""
+            if not body:
+                rd = getattr(e, "read", None)
+                if rd:
+                    try:
+                        body = rd().decode("utf-8", "ignore")[:300]
+                    except Exception:
+                        body = ""
+            raise RuntimeError("%s%s" % (str(e)[:160], (" | " + body) if body else "")) from None
 
     def _tg_send(self, chat_id, text, reply_markup=None):
-        params = {"chat_id": chat_id, "text": text, "parse_mode": ""}
+        params = {"chat_id": chat_id, "text": text}
         if reply_markup is not None:
             params["reply_markup"] = json.dumps(reply_markup)
         try:
             return self._tg("sendMessage", **params)
         except Exception as e:
-            self.log("регистратор: send err: %s" % str(e)[:200])
+            self.log("регистратор: send err chat=%s text=%r: %s" % (chat_id, text[:40], str(e)[:300]))
             return None
 
     def _tg_edit(self, chat_id, message_id, text, reply_markup=None):
-        params = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": ""}
+        params = {"chat_id": chat_id, "message_id": message_id, "text": text}
         if reply_markup is not None:
             params["reply_markup"] = json.dumps(reply_markup)
         try:
