@@ -376,7 +376,7 @@ class Registrar(object):
     def _tt_file_content(self, username, password):
         """Файл .tt для входа на сервер (формат TeamTalk 5: XML с расширением .tt)."""
         c = self.cfg
-        host = c.get("hostname", "")
+        host = c.get("public_host") or c.get("hostname", "")
         tcp = c.get("tcp_port", 10333)
         udp = c.get("udp_port", tcp)
         name = "%s@%s:%s" % (username, host, tcp)
@@ -787,12 +787,15 @@ class Registrar(object):
             if admin:
                 self._tg_edit(admin[0], admin[1], "Учётная запись «%s» создана на сервере." % req["username"])
             if req.get("tg_user_id"):
+                _host = self.cfg.get("public_host") or self.cfg.get("hostname", "")
                 self._tg_send(req["tg_user_id"],
                               "Готово! Твоя учётная запись создана:\n"
+                              "Сервер: %s\n"
+                              "Порт: %s\n"
                               "Логин: %s\n"
                               "Файл для входа на сервер (.tt) пришёл отдельным сообщением — "
                               "открой его в клиенте TeamTalk."
-                              % req["username"])
+                              % (_host, self.cfg.get("tcp_port", ""), req["username"]))
             self._send_tt_file(req)
             self._archive(req_id, req, approved=True)
         else:

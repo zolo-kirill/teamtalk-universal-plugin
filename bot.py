@@ -290,6 +290,10 @@ def _save_config(patch):
 
 HOST = str(_cfg("server.host", "TEAMTALK_HOST", "example.com"))
 TCP_PORT = int(_cfg("server.tcp_port", "TEAMTALK_TCP_PORT", 10333))
+# Адрес, который видит человек в .tt и в сообщении о регистрации.
+# Боты ходят на 127.0.0.1, а людям нужен публичный хост.
+PUBLIC_HOST = (_cfg("registration.public_host", "TT_PUBLIC_HOST", "").strip()
+               or (HOST if HOST not in ("127.0.0.1", "localhost", "::1") else "ranjerserver.ru"))
 UDP_PORT = int(_cfg("server.udp_port", "TEAMTALK_UDP_PORT", 10333))
 NICKNAME = str(_cfg("server.nickname", "TEAMTALK_NICKNAME", "UniversalBot"))
 USERNAME = str(_cfg("server.username", "TEAMTALK_USERNAME", "example"))
@@ -3556,6 +3560,7 @@ def main():
                 "admin_user_ids": REG_ADMIN_USER_IDS,
                 "broadcast_text": REG_BROADCAST_TEXT,
                 "hostname": HOST,
+                "public_host": PUBLIC_HOST,
                 "tcp_port": TCP_PORT,
                 "udp_port": UDP_PORT,
                 "tt_username": REG_ADMIN_TT_USER,
