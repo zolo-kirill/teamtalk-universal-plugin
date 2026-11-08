@@ -290,6 +290,10 @@ class Registrar(object):
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.state, f, ensure_ascii=False, indent=2)
             os.replace(tmp, self.state_file)
+            try:
+                os.chmod(self.state_file, 0o600)  # внутри лежат пароли
+            except Exception:
+                pass
         except Exception as e:
             self.log("регистратор: не сохранить состояние: %s" % str(e)[:200])
 
@@ -793,9 +797,11 @@ class Registrar(object):
                               "Сервер: %s\n"
                               "Порт: %s\n"
                               "Логин: %s\n"
+                              "Пароль: %s\n"
                               "Файл для входа на сервер (.tt) пришёл отдельным сообщением — "
                               "открой его в клиенте TeamTalk."
-                              % (_host, self.cfg.get("tcp_port", ""), req["username"]))
+                              % (_host, self.cfg.get("tcp_port", ""), req["username"],
+                                 req.get("password") or ""))
             self._send_tt_file(req)
             self._archive(req_id, req, approved=True)
         else:
@@ -833,6 +839,7 @@ class Registrar(object):
             "created_at": req.get("created_at"),
             "processed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "status": "approved" if approved else "rejected",
+            "password": req.get("password") or "",
         })
         self._save_state()
 
