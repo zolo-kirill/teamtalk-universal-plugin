@@ -57,7 +57,7 @@ fi
 PY="$REPO_DIR/.venv/bin/python"
 if [ "$CHECK_ONLY" = 0 ]; then
     run "$PY" -m pip install --upgrade pip wheel
-    run "$PY" -m pip install --upgrade requests yt-dlp yandex-music
+    run "$PY" -m pip install --upgrade requests yt-dlp yandex-music curl_cffi
 fi
 
 # ---- 3. Deno для yt-dlp ----
