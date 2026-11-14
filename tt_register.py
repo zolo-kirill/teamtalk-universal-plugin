@@ -18,17 +18,17 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-
-import requests
 import uuid
 from datetime import datetime, timezone
 
+import requests
+
 from TeamTalk5 import (
     TeamTalk,
+    TextMsgType,
     UserAccount,
     UserRight,
     UserType,
-    TextMsgType,
     buildTextMessage,
 )
 
@@ -228,6 +228,7 @@ class _Tt(TeamTalk):
 
 
 class Registrar(object):
+
     def __init__(self, cfg, log_fn=print):
         self.cfg = cfg
         self.log = log_fn
@@ -253,7 +254,8 @@ class Registrar(object):
         self._core = threading.Thread(target=self._core_loop, name="reg-core", daemon=True)
         self._poller = threading.Thread(target=self._poller_loop, name="reg-tg", daemon=True)
 
-    # ------------------------------------------------------------- lifecycle
+    # Жизненный цикл
+
     def start(self):
         # external_updates: токен общий с плагином, апдейты кладёт в tg_q плагин.
         # Свой getUpdates тогда дал бы 409 Conflict, а меню команд затёрло бы плагинное.
@@ -279,7 +281,8 @@ class Registrar(object):
     def stop(self):
         self.stop_evt.set()
 
-    # ---------------------------------------------------------------- state
+    # Состояние
+
     def _load_state(self):
         try:
             with open(self.state_file, encoding="utf-8") as f:
@@ -300,7 +303,8 @@ class Registrar(object):
         except Exception as e:
             self.log("регистратор: не сохранить состояние: %s" % str(e)[:200])
 
-    # ----------------------------------------------------------- telegram api
+    # Telegram API
+
     def _tg(self, method, **params):
         url = "https://api.telegram.org/bot%s/%s" % (self.token, method)
         data = urllib.parse.urlencode(params).encode()
@@ -372,6 +376,7 @@ class Registrar(object):
             return json.loads(r.read().decode())
 
     @staticmethod
+
     def _xml_escape(value):
         return (str(value)
                 .replace("&", "&amp;")
@@ -423,7 +428,8 @@ class Registrar(object):
         except Exception as e:
             self.log("регистратор: не удалось отправить .tt: %s" % str(e)[:200])
 
-    # ------------------------------------------------------------- telegram poll
+    # Опрос Telegram
+
     def _poller_loop(self):
         while not self.stop_evt.is_set():
             try:
@@ -439,7 +445,8 @@ class Registrar(object):
                 _reset_session()
                 time.sleep(1)
 
-    # -------------------------------------------------------------- TT events
+    # События TeamTalk
+
     def _ensure_tt(self):
         if self.tt is not None:
             return
@@ -486,7 +493,8 @@ class Registrar(object):
                 self._ensure_tt()
         self._drop_tt()
 
-    # ------------------------------------------------------------ main actions
+    # Основные действия
+
     def _drain_tg(self):
         while True:
             try:
@@ -534,7 +542,8 @@ class Registrar(object):
             self._tg_send(chat_id, "Команда /register — подать заявку на регистрацию учётной записи "
                                    "на сервере TeamTalk. Для администратора: /create.")
 
-    # ------------------------------------------------------------ registration
+    # Регистрация
+
     def _start_register(self, chat_id, user_id, user):
         if user_id in self.admin_ids:
             self._tg_send(chat_id, "Ты администратор — тебе не нужно регистрироваться. Заявки приходят сюда.")
@@ -613,6 +622,7 @@ class Registrar(object):
             self._tg_send(admin_id, text, reply_markup=kb)
 
     @staticmethod
+
     def _kb(req_id):
         return {"inline_keyboard": [[
             {"text": "Принять", "callback_data": "accept:%s" % req_id},
@@ -620,6 +630,7 @@ class Registrar(object):
         ]]}
 
     @staticmethod
+
     def _type_kb():
         return {"inline_keyboard": [[
             {"text": "Администратор сервера", "callback_data": "type:admin"},
@@ -627,13 +638,15 @@ class Registrar(object):
         ]]}
 
     @staticmethod
+
     def _retry_kb(req_id):
         return {"inline_keyboard": [[
             {"text": "Повторить", "callback_data": "retry:%s" % req_id},
             {"text": "Отменить", "callback_data": "cancel:%s" % req_id},
         ]]}
 
-    # -------------------------------------------------------------- callbacks
+    # Обработка кнопок
+
     def _handle_callback(self, cb):
         user_id = cb.get("from", {}).get("id")
         if user_id not in self.admin_ids:
@@ -747,7 +760,8 @@ class Registrar(object):
             self._tg_send(req["tg_user_id"], "Заявка на логин «%s» отклонена администратором." % req["username"])
         self._archive(req_id, req, approved=False)
 
-    # ------------------------------------------------------------ async finish
+    # Завершение
+
     def on_account_created(self, username):
         req_id = self.pending_users.pop(username.lower(), None)
         if not req_id:
@@ -832,7 +846,8 @@ class Registrar(object):
         except Exception as e:
             self.log("регистратор: broadcast err: %s" % str(e)[:200])
 
-    # ---------------------------------------------------------------- helpers
+    # Вспомогательные функции
+
     def _archive(self, req_id, req, approved):
         self.state["requests"].pop(req_id, None)
         self.state["history"].append({
