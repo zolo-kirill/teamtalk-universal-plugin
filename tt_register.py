@@ -255,8 +255,11 @@ class Registrar(object):
 
     # ------------------------------------------------------------- lifecycle
     def start(self):
-        self._set_commands()
-        self._poller.start()
+        # external_updates: токен общий с плагином, апдейты кладёт в tg_q плагин.
+        # Свой getUpdates тогда дал бы 409 Conflict, а меню команд затёрло бы плагинное.
+        if not self.cfg.get("external_updates"):
+            self._set_commands()
+            self._poller.start()
         self._core.start()
         self.log("регистратор: запущен (token %s…, admins %s)" % (self.token[:6], ",".join(map(str, self.admin_ids))))
 

@@ -269,6 +269,30 @@ _CYR_LETTERS = {
 }
 
 
+_STATE_LOCK = threading.Lock()
+
+
+def _atomic_json(path, data, mode=0o600):
+    """Записать JSON через временный файл: обрыв не оставит половину файла."""
+    tmp = "%s.tmp.%d.%d" % (path, os.getpid(), threading.get_ident())
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _save_config(patch):
     """Deep-merge `patch` into the on-disk config (CONFIG_PATH) and rewrite the
     file atomically, so runtime changes survive a restart."""
@@ -281,11 +305,7 @@ def _save_config(patch):
                 stack.append((dst[k], v))
             else:
                 dst[k] = v
-    tmp = CONFIG_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    os.replace(tmp, CONFIG_PATH)
+    _atomic_json(CONFIG_PATH, data)
 
 
 HOST = str(_cfg("server.host", "TEAMTALK_HOST", "example.com"))
@@ -323,8 +343,6 @@ os.makedirs(INBOX_DIR, exist_ok=True)
 
 STATUS_MSG_FILE = os.path.join(BASE_DIR, ".statusmsg")
 CHANNEL_MSG_FILE = os.path.join(BASE_DIR, ".channel_msg")
-VOICE_ANNOUNCE_FILE = os.path.join(BASE_DIR, ".voice_announce")
-NET_MSG_FILE = os.path.join(BASE_DIR, ".net_msg")  # /as: сетевые приветствия
 FAVORITES_FILE = os.path.join(BASE_DIR, "favorites.json")
 SUBS_FILE = os.path.join(BASE_DIR, "subs.json")
 SUB_TTL_SEC = 86400  # сколько живёт ссылка-подписка (24 ч)
@@ -340,6 +358,7 @@ TG_TOKEN = str(_cfg("telegram.token", "TG_TOKEN", "")).strip()  # optional: own 
 TG_OWNER_USER_ID = int(_cfg("telegram.owner_user_id", "TG_OWNER_USER_ID", 0) or 0)  # only this user can send commands
 TG_NOTIFY_CHAT_ID = int(_cfg("telegram.notify_chat_id", "TG_NOTIFY_CHAT_ID", 0) or 0)
 TG_SEND_ONLY = str(_cfg("telegram.send_only", "TG_SEND_ONLY", "")).strip().lower() in ("1", "true", "yes", "on")  # только отправка, без опроса
+TG_BRIDGE_FILE = str(_cfg("telegram.bridge_file", "TG_BRIDGE_FILE", "")).strip()  # общий токен: читать журнал tg-bridge вместо getUpdates
 TG_JOIN_TO_SUBS = str(_cfg("telegram.join_leave_to_subs", "TG_JOIN_TO_SUBS", "")).strip().lower() in ("1", "true", "yes", "on")  # входы/выходы подписчикам
   # сюда слать вход/выход пользователей (0 = выкл)
 TG_NOTIFY_SERVER = str(_cfg("telegram.server_display_name", "TG_NOTIFY_SERVER_NAME", "")).strip()  # пусто = брать имя сервера из TeamTalk
@@ -371,36 +390,6 @@ ACC_WATCH_NOTICE_DELAY = float(_cfg("account_watch.notice_delay_sec", None, 5) o
 ACC_WATCH_NOTICE_TEXT  = ("Права учётной записи изменились. "
                           "Войдите на сервер заново, чтобы они вступили в силу.")
 
-# Приветствие при входе пользователя на сервер: просьба ознакомиться с правилами
-# (welcome.rules_text в config.json; пусто — стандартная строка).
-WELCOME_RULES = str(_cfg("welcome.rules_text", None, "") or "").strip()
-WELCOME_TEXT_ENABLED = bool(_cfg("welcome.text_enabled", None, True))
-
-# ---- Голосовое приветствие (Silero TTS) ------------------------------
-WELCOME_VOICE_ENABLED = bool(_cfg("welcome.voice_enabled", None, True))
-WELCOME_VOICE_TEXT = str(_cfg("welcome.voice_text", None,
-    "Привет, {nick}! Добро пожаловать на сервер {server}.") or "").strip()
-WELCOME_VOICE_SPEAKER = str(_cfg("welcome.voice_speaker", None, "baya") or "baya").strip()
-# Неизвестный голос переводим на Silero
-if WELCOME_VOICE_SPEAKER not in ("baya", "kseniya", "xenia", "eugene", "aidar"):
-    WELCOME_VOICE_SPEAKER = "baya"
-
-# Двуязычная озвучка: латиницу читает английская модель (v3_en),
-# кириллицу — русская (v4_ru). welcome.voice_bilingual=false возвращает
-# старую транслитерацию в кириллицу.
-WELCOME_VOICE_BILINGUAL = bool(_cfg("welcome.voice_bilingual", None, True))
-WELCOME_EN_SPEAKER = str(_cfg("welcome.voice_en_speaker", None, "en_21") or "en_21").strip()
-
-# Голоса Silero v4_ru, доступные для выбора из Telegram
-WELCOME_VOICES = ("baya", "kseniya", "xenia", "eugene", "aidar")
-WELCOME_VOICE_LABELS = {
-    "baya": "Бая (жен)",
-    "kseniya": "Ксения (жен)",
-    "xenia": "Ксения-2 (жен)",
-    "eugene": "Евгений (муж)",
-    "aidar": "Айдар (муж)",
-}
-WELCOME_VOICE_DUCK = float(_cfg("welcome.voice_duck", None, 0.15) or 0.15)
 # Приглушение эфира на время голосового из Телеграма (music.voice_duck)
 VOICE_FILE_DUCK = float(_cfg("music.voice_duck", None, 0.2) or 0.2)
 # Прямые трансляции. Twitch отдаёт HLS только по внутреннему GQL-запросу
@@ -411,17 +400,6 @@ _TWITCH_GQL = "https://gql.twitch.tv/gql"
 _TWITCH_GQL_HASH = "0828119ded1c13477966434e15800ff57ddacf13ba1911c129dc2200705b0712"
 _STREAM_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-
-try:
-    # 0 — приветствовать каждый вход; «or 0» нужен, чтобы 0 не превращался в 900
-    WELCOME_VOICE_COOLDOWN = max(0, int(_cfg("welcome.voice_cooldown", None, 900) or 0))
-except (TypeError, ValueError):
-    WELCOME_VOICE_COOLDOWN = 900
-SILERO_MODEL_ID = str(_cfg("welcome.silero_model", None, "v4_ru") or "v4_ru")
-
-# ---- Имя сервера для озвучки -----------------------------------------
-_TT_JUNK_RE = re.compile(r"#[A-Za-z][A-Za-z0-9_-]*#")
-
 
 def _fresh_cookies(src=None):
     """yt-dlp rewrites the --cookies file in place on every run, stripping the
@@ -497,6 +475,33 @@ if not YM_TOKEN:
         YM_TOKEN = open(_ym_path, encoding="utf-8").read().strip()
 
 URL_RE = re.compile(r"https?://\S+", re.I)
+
+
+def _url_is_internal(url):
+    """Ссылка ведёт на сам сервер или во внутреннюю сеть (защита от SSRF)."""
+    try:
+        host = (urllib.parse.urlsplit(url).hostname or "").strip("[]").lower()
+    except Exception:
+        return True
+    if not host:
+        return True
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".lan")):
+        return True
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except Exception:
+        return False  # не резолвится — загрузчик сам ответит ошибкой
+    for inf in infos:
+        try:
+            ip = ipaddress.ip_address(str(inf[4][0]).split("%")[0])
+        except ValueError:
+            continue
+        if getattr(ip, "ipv4_mapped", None):
+            ip = ip.ipv4_mapped
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified):
+            return True
+    return False
 
 # FFMpeg/yt-dlp resolve via PATH
 YTDLP = sys.executable and [sys.executable, "-m", "yt_dlp"]
@@ -580,7 +585,6 @@ _YTDLP_UPDATE_STAMP = os.path.join(BASE_DIR, ".ytdlp_update")
 
 
 # ---- константы, восстановленные после резки ----
-TTS_SOCK = str(_cfg("welcome.tts_socket", None, "") or os.path.join(CACHE_DIR, "tts.sock"))
 GEO_CACHE = {}
 GEO_CACHE_TTL = 6 * 3600
 GEO_CACHE_MAX = 500
@@ -623,7 +627,6 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.paused = False
         self.volume = min(DEFAULT_VOLUME, MAX_VOLUME)
         self.cur_vol = self.volume / 100.0  # actual gain, ramps toward self.volume
-        self.duck = 1.0  # множитель приглушения (голосовое приветствие)
         self.service = DEFAULT_SERVICE  # "yt" = YouTube, "ym" = Yandex.Music
         self.cur_offset_ms = 0
         self.segment_started_at = 0
@@ -659,7 +662,6 @@ class MusicBot(TeamTalk5.TeamTalk):
         # reply targeting: PM to the command author, optionally mirrored to channel
         self.reply_user_id = 0  # who sent the last command → PM replies
         self.channel_msg = self._load_channel_msg()  # mirror replies to channel (cm)
-        self._announce_pending = None  # (path, offset) of real track waiting behind a title announcement
         # dl: upload current track to the channel as a server file (TT_DoSendFile)
         self._dl_cmd_id = None  # command id of the active upload (from TT_DoSendFile)
         self._dl_remote = None  # remote file name
@@ -683,9 +685,17 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._music_username = None  # username музыкального бота (getMe, кэш)
         self._music_offset = 0
         self.admins = self._load_admins()  # user id администраторов Telegram (users.db); владелец — всегда
-        self.pending_replies = {}  # пересылка реплик вырезана вместе с Telegram-управлением
+        self._rep_lock = threading.Lock()
+        self.pending_replies = self._load_replies()  # tg message_id -> собеседник в TeamTalk
+        self.bans = self._load_bans()  # кого бот забанил (для /unban)
+        self._tg_reply_until = 0  # до какого времени ответы зеркалятся в Telegram-чат
+        self._tg_ctx_user = 0  # Telegram ID автора последней команды
+        self._tg_out = queue.Queue()  # исходящие запросы к Telegram (по порядку, в фоне)
+        if TG_TOKEN:
+            threading.Thread(target=self._tg_out_worker, daemon=True, name="tg-out").start()
         if TG_TOKEN and not TG_SEND_ONLY:
-            log("telegram relay enabled (только исходящие уведомления)")
+            threading.Thread(target=self._tg_poll, daemon=True, name="tg-poll").start()
+            log("telegram relay enabled (команды, кнопки, пересылка сообщений)")
         if TG_MUSIC_TOKEN:
             threading.Thread(target=self._music_poll, daemon=True, name="music-poll").start()
             log("music telegram bot enabled")
@@ -709,7 +719,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         Each call is one 20 ms block; self.cur_vol steps ~2% toward self.volume,
         so a full-scale change eases in over ~1 second instead of snapping.
         """
-        target = (self.volume / 100.0) * self.duck
+        target = self.volume / 100.0
         cur = self.cur_vol
         if cur < target:
             cur = min(target, cur + 0.02)
@@ -915,9 +925,8 @@ class MusicBot(TeamTalk5.TeamTalk):
                 t: p for t, p in self.mus_pending.items()
                 if p.get("created", 0) > now - MUSIC_SUB_TTL_SEC
             }
-            with open(MUSIC_SUBS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"pending": self.mus_pending, "active": self.music_subs},
-                          f, ensure_ascii=False, indent=2)
+            _atomic_json(MUSIC_SUBS_FILE,
+                         {"pending": dict(self.mus_pending), "active": dict(self.music_subs)})
         except Exception as e:
             log("music subs save err: %s" % e)
 
@@ -937,8 +946,14 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._send(text)
 
     def _send(self, text):
+        tg_chat = self._tg_ctx_chat()
+        if tg_chat:
+            self._tg_send(tg_chat, text)
         if not self.logged_in:
             log("_send skip: logged_in=%s" % self.logged_in)
+            return
+        if tg_chat and not self.channel_msg:
+            log("_send(%r) -> tg %s" % (text[:80], tg_chat))
             return
         try:
             sent_pm = False
@@ -960,11 +975,6 @@ class MusicBot(TeamTalk5.TeamTalk):
             log("_send(%r) pm=%s chan=%s" % (text, sent_pm, to_channel and self.my_channel_id > 0))
         except Exception as e:
             log("send error: %s" % e)
-        if self._tg_reply_chat:
-            try:
-                self._tg_api("sendMessage", chat_id=self._tg_reply_chat, text=text[:4000])
-            except Exception as e:
-                log("tg send err: %s" % str(e)[:120])
 
     def _enqueue_next(self):
         """Start next queue item from main thread."""
@@ -2088,18 +2098,14 @@ class MusicBot(TeamTalk5.TeamTalk):
     def _save_all(self):
         """Полное сохранение всех настроек: config.json плюс файлы состояния.
 
-        Пишет всё, что бот держит в памяти: ник, сервис, громкость, озвучку
-        приветствия и голос, сообщения в канал, озвучку названий, статус.
+        Пишет всё, что бот держит в памяти: ник, сервис, громкость,
+        сообщения в канал, статус.
         После перезапуска бот поднимается с этим же состоянием.
         """
         _save_config({
             "server": {"nickname": self.nickname},
             "runtime": {"main_service": self.service},
             "playback": {"default_volume": int(self.volume)},
-            "welcome": {
-                "voice_enabled": bool(WELCOME_VOICE_ENABLED),
-                "voice_speaker": WELCOME_VOICE_SPEAKER,
-            },
         })
         try:
             with open(STATUS_MSG_FILE, "w") as f:
@@ -2111,10 +2117,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "nick": self.nickname,
             "service": self.service,
             "volume": int(self.volume),
-            "tts": bool(WELCOME_VOICE_ENABLED),
-            "speaker": WELCOME_VOICE_SPEAKER,
             "channel_msg": bool(self.channel_msg),
-            "voice_announce": False,  # озвучка названий вырезана в lite
             "status": self.status_msg or "",
         }
 
@@ -2274,8 +2277,7 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _save_favorites(self):
         try:
-            with open(FAVORITES_FILE, "w", encoding="utf-8") as f:
-                json.dump({"items": self.favorites}, f, ensure_ascii=False, indent=2)
+            _atomic_json(FAVORITES_FILE, {"items": dict(self.favorites)})
         except Exception as e:
             log("fav save err: %s" % e)
 
@@ -2307,6 +2309,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             u = URL_RE.search(arg[2:])
             if not u:
                 self._send("Формат: f + https://…")
+                return
+            if self._url_denied(u.group(0), getattr(self, "_cmd_from", 0)):
                 return
             key = self._normalize_ym_url(u.group(0))
             if any(it["key"] == key for it in self.favorites):
@@ -2434,8 +2438,8 @@ class MusicBot(TeamTalk5.TeamTalk):
     def _remember_last(self, key, label, is_radio):
         """Запомнить последнее воспроизведение (переживает перезапуск)."""
         try:
-            with open(LAST_PLAYED_FILE, "w", encoding="utf-8") as f:
-                json.dump({"key": key, "label": label, "radio": bool(is_radio)}, f, ensure_ascii=False)
+            _atomic_json(LAST_PLAYED_FILE,
+                         {"key": key, "label": label, "radio": bool(is_radio)})
         except Exception as e:
             log("last played save err: %s" % e)
 
@@ -2551,7 +2555,7 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     # Команды-«запросы», которые при приходе из Telegram объявляются в канале TeamTalk.
     _TG_KNOWN_CMDS = frozenset([
-        "v", "volume", "sf", "sb", "sub", "cm", "vo", "rs", "restart", "sv", "svc",
+        "v", "volume", "sf", "sb", "sub", "cm", "rs", "restart", "sv", "svc",
         "cn", "cs", "s", "stop", "skip", "queue", "q", "status", "now",
         "dl", "download", "lf", "n", "next", "b", "back", "prev", "playlist",
         "radio", "r", "f", "fav", "favorites", "play", "p", "pause", "resume",
@@ -2568,7 +2572,18 @@ class MusicBot(TeamTalk5.TeamTalk):
         parts = t.split(None, 1)
         return bool(parts and parts[0].lower() in self._TG_KNOWN_CMDS)
 
+    def _url_denied(self, url, from_user):
+        """Не-админ TeamTalk прислал ссылку на внутренний адрес — отказ."""
+        if not from_user or self._is_admin(from_user):
+            return False
+        if not _url_is_internal(url):
+            return False
+        log("blocked internal url from %s: %s" % (from_user, url[:120]))
+        self._send("Ссылки на внутренние адреса сервера не принимаются.")
+        return True
+
     def _handle_cmd(self, text, from_user):
+        self._cmd_from = from_user
         text = (text or "").strip()
         if not text:
             return
@@ -2582,18 +2597,25 @@ class MusicBot(TeamTalk5.TeamTalk):
         first = parts[0]
         if from_user:
             self.reply_user_id = from_user
+            self._tg_reply_chat = None
+            self._tg_reply_until = 0
         self.silent = False  # explicit command → report status again
 
         # --- гейт: служебные команды — только администраторам ---
         # (в TeamTalk админ = USERTYPE_ADMIN; из Telegram сюда попадают уже после _tg_allowed)
         admin_only = first in (
             "rs", "restart", "cn", "cs", "sv", "svc", "cm", "channel",
-            "sc", "save", "cookies"
+            "sc", "save", "cookies",
+            "kick", "ban", "unban", "net", "admins", "subs",
         )
         if not admin_only:
             admin_only = first == "lf" or cmd.startswith("lf ")
         if admin_only and not self._is_admin(from_user):
             self._send("Эта команда только для администраторов.")
+            return
+
+        # --- восстановленные команды: online, sub, kick, ban, unban, net, admins, subs, panel ---
+        if self._extra_cmd(cmd, text, first, from_user):
             return
 
         # --- громкость: v 100 / v 50 / громкость 30 / volume 80 ---
@@ -2662,12 +2684,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             try:
                 st = self._save_all()
                 self._send("Сохранено полностью: ник «%s», сервис %s, громкость %d, "
-                           "озвучка приветствия %s (%s), сообщения в канал %s, "
-                           "озвучка названий %s, статус %s."
+                           "сообщения в канал %s, статус %s."
                            % (st["nick"], svc, st["volume"],
-                              "вкл" if st["tts"] else "выкл", st["speaker"],
                               "вкл" if st["channel_msg"] else "выкл",
-                              "вкл" if st["voice_announce"] else "выкл",
                               ("«%s»" % st["status"]) if st["status"] else "пуст"))
             except Exception as e:
                 log("sc save err: %s" % e)
@@ -2717,7 +2736,6 @@ class MusicBot(TeamTalk5.TeamTalk):
             self.current = None
             self.current_orig = None
             self.cur_offset_ms = 0
-            self._announce_pending = None
             self._set_status(self.status_msg)
             self._send("Воспроизведение остановлено.")
             return
@@ -2924,6 +2942,8 @@ class MusicBot(TeamTalk5.TeamTalk):
             if not u:
                 self._send("Это не ссылка: «%s». Формат: /u https://…" % parts[1][:80])
                 return
+            if self._url_denied(u.group(0), from_user):
+                return
             self._handle_url(u.group(0), u.group(0))
             return
 
@@ -2932,6 +2952,8 @@ class MusicBot(TeamTalk5.TeamTalk):
         if m and not low.startswith("/"):
             # Через _handle_url, а не _switch_to: так живой поток (радио)
             # играется напрямую, а плейлист раскрывается в очередь.
+            if self._url_denied(m.group(0), from_user):
+                return
             self._handle_url(m.group(0), m.group(0))
             return
 
@@ -2991,13 +3013,9 @@ class MusicBot(TeamTalk5.TeamTalk):
             "lf <путь> — файл с диска\n"
             "dl — выгрузить текущий трек файлом в канал\n"
             "sub — уведомления о входах; sub mus — о треках\n"
-            "login — вход в YouTube; cookies — обновить куки",
+            "cookies — обновить куки YouTube",
 
-            "Справка 3/4 · оформление и приветствия\n"
-            "as on | as off — сетевые приветствия при входе\n"
-            "tts on | tts off — голосовое приветствие\n"
-            "tts <голос> — выбрать голос; tts — показать текущий\n"
-            "vo — озвучка названий треков\n"
+            "Справка 3/4 · оформление\n"
             "cm — ответы в канал или в личку\n"
             "cn <ник> — сменить ник\n"
             "cs <текст> — статус\n"
@@ -3094,6 +3112,827 @@ class MusicBot(TeamTalk5.TeamTalk):
             v = v.decode("utf-8", "ignore")
         return v.replace("\x00", "").strip()
 
+    # ================= Telegram-управление (восстановлено) =================
+
+    _TG_EXTRA_CMDS = frozenset([
+        "help", "h", "start", "cookies", "sc", "save", "cn", "cs", "rs", "restart",
+        "online", "who", "kick", "ban", "unban", "net", "admins", "subs",
+        "panel", "пульт", "unsub", "cancel", "volume", "v",
+    ])
+    _AUDIO_EXTS = (".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".opus", ".aac", ".wma")
+
+    # ---- отправка ----
+    def _tg_out_worker(self):
+        while True:
+            method, params, cb = self._tg_out.get()
+            try:
+                res = self._tg_api(method, **params)
+                if cb:
+                    cb(res)
+            except Exception as e:
+                log("tg out err (%s): %s" % (method, str(e)[:150]))
+
+    def _tg_send(self, chat_id, text, kb=None, cb=None):
+        if not TG_TOKEN or not chat_id:
+            return
+        p = {"chat_id": chat_id, "text": (text or "")[:4000] or "…"}
+        if kb is not None:
+            p["reply_markup"] = json.dumps({"inline_keyboard": kb}, ensure_ascii=False)
+        self._tg_out.put(("sendMessage", p, cb))
+
+    def _tg_ctx_chat(self):
+        if self._tg_reply_chat and time.time() < self._tg_reply_until:
+            return self._tg_reply_chat
+        return None
+
+    def _tg_set_ctx(self, chat, uid):
+        """Дальнейшие ответы бота (в т.ч. отложенные, вроде результатов поиска) — в этот чат."""
+        self._tg_reply_chat = chat
+        self._tg_reply_until = time.time() + 300
+        self._tg_ctx_user = int(uid or 0)
+        self.reply_user_id = 0
+
+    def _tg_bot_username(self):
+        if self._tg_username:
+            return self._tg_username
+        try:
+            res = self._tg_api("getMe")
+            self._tg_username = ((res or {}).get("result") or {}).get("username")
+        except Exception as e:
+            log("tg getMe err: %s" % str(e)[:120])
+        return self._tg_username
+
+    # ---- приём ----
+    # действия кнопок плагина и регистратора (у них разные префиксы callback_data)
+    _TG_CB_ACTS = ("pm", "kick", "ban", "bany", "no", "unban", "unsub", "c")
+    _REG_CB_ACTS = ("accept", "reject", "type", "retry", "cancel")
+
+    def _reg_shared(self):
+        """Регистратор работает на том же токене, что и плагин: апдейты делим сами."""
+        return bool(REG_TOKEN and REG_TOKEN == TG_TOKEN and not TG_SEND_ONLY)
+
+    def _tg_route(self, upd):
+        """Кому отдать апдейт: 'me' — плагину, 'reg' — регистратору, None — не наш.
+
+        None бывает только при общем токене (мост): апдейт тогда читают все копии,
+        и каждая берёт лишь своих админов, свои ссылки подписки и своих подписчиков."""
+        reg = getattr(self, "_registrar", None) if self._reg_shared() else None
+        shared = bool(TG_BRIDGE_FILE)
+        admins = self._tg_admin_ids()
+        cb = upd.get("callback_query")
+        if cb:
+            uid = int((cb.get("from") or {}).get("id") or 0)
+            act = (cb.get("data") or "").partition(":")[0]
+            if reg is not None and act in self._REG_CB_ACTS:
+                return "reg"
+            if shared and (uid not in admins or act not in self._TG_CB_ACTS):
+                return None
+            return "me"
+        msg = upd.get("message") or {}
+        if not msg:
+            return None
+        uid = int((msg.get("from") or {}).get("id") or 0)
+        chat = (msg.get("chat") or {}).get("id")
+        text = (msg.get("text") or "").strip()
+        parts = text.split(None, 1)
+        head = parts[0].lower().split("@", 1)[0] if parts else ""
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        if reg is not None:
+            if head in ("/register", "/create") or (head == "/start" and not arg.startswith("sub_")):
+                return "reg"
+            if text and not text.startswith("/") and (reg.conv.get(uid) or {}).get("step"):
+                return "reg"
+        if head == "/start" and arg.startswith("sub_"):
+            if shared and arg not in self.sub_pending:
+                return None
+            return "me"
+        if uid in admins:
+            return "me"
+        if str(chat) in self.sub_active and head in ("/online", "/who", "/unsub", "/отписаться"):
+            return "me"
+        if reg is not None:
+            return "reg"
+        return None if shared else "me"
+
+    def _tg_bridge_read(self):
+        """Новые апдейты из журнала моста (общий токен). Позиция — по update_id."""
+        pos_file = os.path.join(BASE_DIR, "tg_bridge.last")
+        if not hasattr(self, "_br_fh"):
+            self._br_fh = None
+            self._br_buf = b""
+            self._br_ino = None
+            try:
+                self._br_last = int(open(pos_file).read().strip() or 0)
+            except Exception:
+                self._br_last = None  # первый запуск: всё, что уже в журнале, пропускаем
+        out = []
+        try:
+            st = os.stat(TG_BRIDGE_FILE)
+        except OSError:
+            st = None
+        if self._br_fh is None:
+            if st is None:
+                return out
+            self._br_fh = open(TG_BRIDGE_FILE, "rb")
+            self._br_ino = os.fstat(self._br_fh.fileno()).st_ino
+            self._br_buf = b""
+        rotated = st is not None and st.st_ino != self._br_ino
+        self._br_buf += self._br_fh.read()
+        lines = self._br_buf.split(b"\n")
+        self._br_buf = lines.pop()
+        first_run = self._br_last is None
+        top = self._br_last or 0
+        for ln in lines:
+            try:
+                upd = json.loads(ln.decode("utf-8"))
+            except Exception:
+                continue
+            uid = int(upd.get("update_id") or 0)
+            if uid <= top:
+                continue
+            top = uid
+            if not first_run:
+                out.append(upd)
+        if rotated:
+            # мост пересоздал журнал: старый дочитан, открываем новый
+            try:
+                self._br_fh.close()
+            except Exception:
+                pass
+            self._br_fh = None
+        if top != (self._br_last or 0) or first_run:
+            self._br_last = top
+            try:
+                with open(pos_file + ".tmp", "w") as f:
+                    f.write(str(top))
+                os.replace(pos_file + ".tmp", pos_file)
+            except Exception:
+                pass
+        return out
+
+    def _tg_poll(self):
+        started = time.time()
+        self._tg_bot_username()
+        if self._reg_shared():
+            # регистратор запускается чуть позже плагина — ждём его, чтобы не перехватить его апдейты
+            for _ in range(30):
+                if getattr(self, "_registrar", None) is not None:
+                    break
+                time.sleep(0.5)
+        if TG_BRIDGE_FILE:
+            log("telegram: общий токен, читаю журнал моста %s" % TG_BRIDGE_FILE)
+        while True:
+            try:
+                if TG_BRIDGE_FILE:
+                    batch = self._tg_bridge_read()
+                    if not batch:
+                        time.sleep(1)
+                        continue
+                else:
+                    res = self._tg_api("getUpdates", timeout=25, offset=self._tg_offset,
+                                       allowed_updates=json.dumps(["message", "callback_query"]))
+                    batch = res.get("result", [])
+                for upd in batch:
+                    if not TG_BRIDGE_FILE:
+                        self._tg_offset = upd.get("update_id", 0) + 1
+                    msg = upd.get("message") or {}
+                    route = self._tg_route(upd)
+                    if route == "reg":
+                        reg = getattr(self, "_registrar", None)
+                        if reg is not None:
+                            reg.tg_q.put(upd)
+                        continue
+                    if route != "me":
+                        continue
+                    # накопившееся до запуска не выполняем: старый /play не должен сработать
+                    if msg and msg.get("date", 0) < started - 120:
+                        continue
+                    if msg and any(k in msg for k in ("document", "audio", "voice")):
+                        try:
+                            self._tg_fetch_file(msg)
+                        except Exception as e:
+                            log("tg file err: %s" % str(e)[:150])
+                            self._tg_send((msg.get("chat") or {}).get("id"),
+                                          "Не удалось принять файл: %s" % str(e)[:150])
+                        continue
+                    self.api_q.put(("tg_update", upd))
+            except Exception as e:
+                log("tg poll err: %s" % str(e)[:150])
+                time.sleep(5)
+
+    def _tg_fetch_file(self, msg):
+        """Поток опроса: скачать файл от админа. Куки — сохранить, аудио — в эфир."""
+        chat = (msg.get("chat") or {}).get("id")
+        uid = int((msg.get("from") or {}).get("id") or 0)
+        if uid not in self._tg_admin_ids():
+            self._tg_send(chat, "Файлы принимаются только от администраторов.")
+            return
+        obj = msg.get("document") or msg.get("audio") or msg.get("voice") or {}
+        name = obj.get("file_name") or ("voice_%d.oga" % msg.get("message_id", 0)
+                                        if "voice" in msg else "file")
+        if (obj.get("file_size") or 0) > 20 * 1024 * 1024:
+            self._tg_send(chat, "Файл больше 20 МБ: Telegram не отдаёт ботам такие файлы.")
+            return
+        fi = self._tg_api("getFile", file_id=obj.get("file_id", ""))
+        fpath = ((fi or {}).get("result") or {}).get("file_path")
+        if not fpath:
+            self._tg_send(chat, "Telegram не отдал файл.")
+            return
+        url = "https://api.telegram.org/file/bot%s/%s" % (TG_TOKEN, fpath)
+        with _tg_urlopen(url, timeout=180) as r:
+            data = r.read()
+        # режим приёма кук (/cookies)
+        if self._await_cookies and time.time() < self._await_cookies:
+            text = data.decode("utf-8", "ignore")
+            if _looks_like_cookie_export(text) or name.lower().endswith(".txt"):
+                try:
+                    norm = _normalize_cookie_text(text)
+                except ValueError as e:
+                    self._tg_send(chat, "Это не экспорт кук YouTube: %s" % e)
+                    return
+                if os.path.isfile(COOKIES):
+                    shutil.copy2(COOKIES, COOKIES + ".bak-%d" % int(time.time()))
+                with open(COOKIES, "w", encoding="utf-8") as f:
+                    f.write(norm)
+                self._await_cookies = 0.0
+                n = norm.count("\n") - 1
+                try:
+                    self._tg_api("sendMessage", chat_id=chat,
+                                 text="Куки сохранены (%d строк). Бот перезапускается." % n)
+                except Exception:
+                    pass
+                threading.Thread(target=_restart_bot_soon, daemon=True).start()
+                return
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in self._AUDIO_EXTS:
+            self._tg_send(chat, "Принимаются только аудиофайлы (%s)." % ", ".join(self._AUDIO_EXTS))
+            return
+        # чистим входящие старше суток
+        now = time.time()
+        for p in glob.glob(os.path.join(INBOX_DIR, "*")):
+            try:
+                if now - os.path.getmtime(p) > 86400:
+                    os.remove(p)
+            except Exception:
+                pass
+        safe = re.sub(r'[\\/:*?"<>|\s]+', "_", name).strip("_")[:100] or "file" + ext
+        path = os.path.join(INBOX_DIR, "%d_%s" % (int(now), safe))
+        with open(path, "wb") as f:
+            f.write(data)
+        title = (obj.get("title") or os.path.splitext(name)[0] or "файл из Telegram")
+        if obj.get("performer"):
+            title = "%s — %s" % (obj["performer"], title)
+        self.api_q.put(("tg_file", chat, path, title))
+
+    def _tg_play_file(self, chat, path, title):
+        self._tg_set_ctx(chat, self._tg_ctx_user)
+        self._play_local(path, title)
+        self._send("Играет файл из Telegram: %s" % title)
+
+    def _tg_known(self):
+        return set(self._TG_KNOWN_CMDS) | set(self._TG_EXTRA_CMDS)
+
+    def _tg_guest_text(self, chat):
+        if str(chat) in self.sub_active:
+            return ("Подписка на уведомления сервера %s активна. Кто на сервере: /online. "
+                    "Отписка: /unsub." % self._server_name())
+        return ("Это бот уведомлений сервера %s. Чтобы подписаться на входы и выходы, "
+                "отправьте в TeamTalk боту личное сообщение /sub — придёт ссылка." % self._server_name())
+
+    def _tg_on_update(self, upd):
+        """Главный поток: одно обновление Telegram (сообщение или нажатие кнопки)."""
+        try:
+            if upd.get("callback_query"):
+                self._tg_on_callback(upd["callback_query"])
+                return
+            msg = upd.get("message") or {}
+            chat = (msg.get("chat") or {}).get("id")
+            fr = msg.get("from") or {}
+            uid = int(fr.get("id") or 0)
+            text = (msg.get("text") or "").strip()
+            if not chat or not uid or not text:
+                return
+            head = text.split(None, 1)[0]
+            if head.startswith("/") and "@" in head:
+                botname = head.split("@", 1)[1].lower()
+                me = (self._tg_username or "").lower()
+                if me and botname != me:
+                    return  # команда другому боту в группе
+                text = head.split("@", 1)[0] + text[len(head):]
+            low = text.lower()
+            is_admin = uid in self._tg_admin_ids()
+
+            if low == "/start" or low.startswith("/start "):
+                arg = text[6:].strip()
+                if arg.startswith("sub_"):
+                    self._tg_activate_sub(chat, fr, arg)
+                elif is_admin:
+                    self._tg_send(chat, "Бот сервера %s на связи. Справка: /help, пульт: /panel."
+                                  % self._server_name())
+                else:
+                    self._tg_send(chat, self._tg_guest_text(chat))
+                return
+            if low in ("/unsub", "/отписаться"):
+                rec = self.sub_active.pop(str(chat), None)
+                self._save_subs()
+                self._tg_send(chat, "Подписка отменена." if rec else "Подписки на уведомления нет.")
+                return
+            if not is_admin:
+                if str(chat) in self.sub_active and low in ("/online", "/who"):
+                    self._tg_send(chat, self._online_text())
+                else:
+                    self._tg_send(chat, self._tg_guest_text(chat))
+                return
+
+            log("tg cmd from %s: %s" % (uid, text[:120]))
+            if low == "/cancel":
+                had = self._pending_msg is not None
+                self._pending_msg = None
+                self._tg_send(chat, "Отменено." if had else "Отменять нечего.")
+                return
+            # ответ на пересланное личное сообщение → в личку человеку в TeamTalk
+            rep = msg.get("reply_to_message") or {}
+            if rep and not text.startswith("/"):
+                with self._rep_lock:
+                    rec = self.pending_replies.get(str(rep.get("message_id")))
+                if rec:
+                    if time.time() - (rec.get("last_used_at") or rec.get("created_at") or 0) > REPLY_TTL_SEC:
+                        self._tg_send(chat, "Время на ответ истекло (1 час). Напишите через /online.")
+                        return
+                    if self._tg_pm_to(chat, rec.get("tt_user_id"), rec.get("username"), rec.get("nick"), text):
+                        with self._rep_lock:
+                            rec["last_used_at"] = time.time()
+                        self._save_replies()
+                    return
+            # кнопка «написать» из /online
+            pm = self._pending_msg
+            if pm and pm.get("cid") == chat and not text.startswith("/"):
+                self._pending_msg = None
+                self._tg_pm_to(chat, pm.get("uid"), pm.get("username"), pm.get("nick"), text)
+                return
+
+            self._tg_set_ctx(chat, uid)
+            if not text.startswith("/"):
+                if URL_RE.search(text) or low in ("пульт", "panel", "волна", "моя волна"):
+                    self._handle_cmd(text, 0)
+                else:
+                    self._tg_send(chat, "Это не команда. Справка: /help. Написать человеку в TeamTalk: "
+                                        "кнопка «написать» в /online или ответ на пересланное сообщение.")
+                return
+            first = low[1:].split(None, 1)[0] if len(low) > 1 else ""
+            if first not in self._tg_known():
+                self._tg_send(chat, "Неизвестная команда /%s. Справка: /help." % first)
+                return
+            self._handle_cmd(text, 0)
+        except Exception as e:
+            log("tg update err: %s\n%s" % (e, traceback.format_exc()))
+
+    def _tg_on_callback(self, cb):
+        try:
+            fr = cb.get("from") or {}
+            uid = int(fr.get("id") or 0)
+            chat = ((cb.get("message") or {}).get("chat") or {}).get("id") or uid
+            data = cb.get("data") or ""
+            self._tg_out.put(("answerCallbackQuery", {"callback_query_id": cb.get("id", "")}, None))
+            if uid not in self._tg_admin_ids():
+                self._tg_send(chat, "Кнопки доступны только администраторам.")
+                return
+            act, _, val = data.partition(":")
+            self._tg_set_ctx(chat, uid)
+            if act == "pm":
+                u = self.users.get(int(val))
+                if not u:
+                    self._tg_send(chat, "Этого пользователя уже нет на сервере.")
+                    return
+                nick = self._tt_field(u, "szNickname") or self._tt_field(u, "szUsername") or val
+                self._pending_msg = {"cid": chat, "uid": int(val), "nick": nick,
+                                     "username": self._tt_field(u, "szUsername")}
+                self._tg_send(chat, "Напишите сообщение для %s одним текстом. Отмена: /cancel." % nick)
+            elif act == "kick":
+                self._kick_uid(int(val), False)
+            elif act == "ban":
+                u = self.users.get(int(val))
+                if not u:
+                    self._tg_send(chat, "Этого пользователя уже нет на сервере.")
+                    return
+                nick = self._tt_field(u, "szNickname") or self._tt_field(u, "szUsername") or val
+                kb = [[{"text": "да, заблокировать %s" % nick[:40], "callback_data": "bany:%s" % val},
+                       {"text": "отмена", "callback_data": "no:"}]]
+                self._tg_send(chat, "Заблокировать %s по IP и исключить с сервера?" % nick, kb)
+            elif act == "bany":
+                self._kick_uid(int(val), True)
+            elif act == "no":
+                self._tg_send(chat, "Отменено.")
+            elif act == "unban":
+                v = self.bans.get(val)
+                if not v or not v.get("ip"):
+                    self._tg_send(chat, "Эта блокировка уже снята.")
+                else:
+                    self._unban_ip(v["ip"])
+            elif act == "unsub":
+                rec = self.sub_active.pop(val, None)
+                self._save_subs()
+                self._tg_send(chat, "Подписка %s отменена." % ((rec or {}).get("nick") or val)
+                              if rec else "Этой подписки уже нет.")
+            elif act == "c":
+                self._panel_action(val)
+        except Exception as e:
+            log("tg callback err: %s\n%s" % (e, traceback.format_exc()))
+
+    # ---- подписки ----
+    def _tg_activate_sub(self, chat, fr, token):
+        rec = self.sub_pending.pop(token, None)
+        if not rec or rec.get("created", 0) < time.time() - SUB_TTL_SEC:
+            self._save_subs()
+            self._tg_send(chat, "Ссылка недействительна или истекла. Отправьте /sub боту в TeamTalk ещё раз.")
+            return
+        rec["subscribed_at"] = time.time()
+        rec["tg_name"] = " ".join(x for x in (fr.get("first_name"), fr.get("last_name")) if x)
+        rec["tg_username"] = fr.get("username") or ""
+        self.sub_active[str(chat)] = rec
+        self._save_subs()
+        who = rec.get("nick") or rec.get("username") or "аккаунт"
+        self._tg_send(chat, "Подписка оформлена (%s). Сюда будут приходить входы и выходы на сервере %s. "
+                            "Кто на сервере: /online. Отписка: /unsub." % (who, self._server_name()))
+        log("tg sub activated: %s -> %s" % (who, chat))
+
+    def _sub_cmd(self, from_user, mus=False):
+        if not from_user:
+            self._send("Подписка оформляется из TeamTalk: отправьте боту в личку /sub или /sub mus.")
+            return
+        u = self.users.get(from_user)
+        rec = {"nick": self._tt_field(u, "szNickname") if u else "",
+               "username": self._tt_field(u, "szUsername") if u else "",
+               "nUserID": from_user, "created": time.time()}
+        if mus:
+            if not TG_MUSIC_TOKEN:
+                self._send("Подписка на музыку на этом сервере не настроена.")
+                return
+            bot = self._music_bot_username()
+            token = "sub_mus_" + secrets.token_hex(8)
+            if bot:
+                self.mus_pending[token] = rec
+                self._save_music_subs()
+        else:
+            if not TG_TOKEN:
+                self._send("Telegram-бот на этом сервере не настроен.")
+                return
+            bot = self._tg_bot_username()
+            token = "sub_" + secrets.token_hex(8)
+            if bot:
+                self.sub_pending[token] = rec
+                self._save_subs()
+        if not bot:
+            self._send("Не удалось связаться с Telegram. Попробуйте позже.")
+            return
+        what = "на треки" if mus else "на входы и выходы"
+        self._send("Ссылка для подписки %s (действует 24 часа): https://t.me/%s?start=%s\n"
+                   "Откройте её в Telegram и нажмите «Запустить»." % (what, bot, token))
+
+    def _unsub_tt(self, from_user):
+        if not from_user:
+            self._send("Отписка в Telegram: /unsub в чате с ботом.")
+            return
+        u = self.users.get(from_user)
+        uname = self._tt_field(u, "szUsername") if u else ""
+        guests = set(str(x) for x in (_cfg("guard.guest_logins", None, ["1", ""]) or []))
+        n = 0
+        for store in (self.sub_active, self.music_subs):
+            for cid, sub in list(store.items()):
+                if sub.get("nUserID") == from_user or (uname and uname not in guests
+                                                       and sub.get("username") == uname):
+                    del store[cid]
+                    n += 1
+        self._save_subs()
+        self._save_music_subs()
+        self._send("Подписки отменены: %d." % n if n else "Активных подписок на эту учётную запись нет.")
+
+    # ---- кто на сервере ----
+    def _online_list(self):
+        out = []
+        for uid, u in sorted(dict(self.users).items()):
+            if uid == self.my_user_id:
+                continue
+            out.append((uid, self._tt_field(u, "szNickname"), self._tt_field(u, "szUsername"), u))
+        return out
+
+    def _online_text(self):
+        users = self._online_list()
+        if not users:
+            return "На сервере %s сейчас никого нет." % self._server_name()
+        lines = ["На сервере %s: %d" % (self._server_name(), len(users))]
+        for i, (uid, nick, uname, u) in enumerate(users, 1):
+            extra = " (%s)" % uname if uname and uname != nick else ""
+            lines.append("%d. %s%s" % (i, nick or "(без ника)", extra))
+        return "\n".join(lines)
+
+    def _online_cmd(self):
+        chat = self._tg_ctx_chat()
+        if not chat:
+            self._send(self._online_text())
+            return
+        kb = []
+        for uid, nick, uname, u in self._online_list()[:30]:
+            if (uname or "").lower() in TG_NOTIFY_IGNORE:
+                continue  # свои боты: без кнопок
+            n = (nick or uname or str(uid))[:24]
+            kb.append([{"text": "написать %s" % n, "callback_data": "pm:%d" % uid},
+                       {"text": "исключить %s" % n, "callback_data": "kick:%d" % uid},
+                       {"text": "бан %s" % n, "callback_data": "ban:%d" % uid}])
+        self._tg_send(chat, self._online_text(), kb or None)
+
+    def _find_users(self, q):
+        q = (q or "").strip().lower()
+        exact, part = [], []
+        for row in self._online_list():
+            uid, nick, uname, u = row
+            n, un = (nick or "").lower(), (uname or "").lower()
+            if q in (n, un, str(uid)):
+                exact.append(row)
+            elif q and q in n:
+                part.append(row)
+        return exact or part
+
+    # ---- кик, бан, разбан ----
+    def _kick_cmd(self, arg, ban=False):
+        if not arg:
+            self._send("Использование: /%s <ник>" % ("ban" if ban else "kick"))
+            return
+        found = self._find_users(arg)
+        if not found:
+            self._send("Пользователь «%s» не найден на сервере." % arg)
+            return
+        if len(found) > 1:
+            self._send("Под «%s» подходят несколько: %s. Уточните ник."
+                       % (arg, ", ".join((n or un) for _, n, un, _ in found[:10])))
+            return
+        self._kick_uid(found[0][0], ban)
+
+    def _kick_uid(self, uid, ban=False):
+        u = self.users.get(uid)
+        if not u or uid == self.my_user_id:
+            self._send("Этого пользователя уже нет на сервере.")
+            return
+        nick = self._tt_field(u, "szNickname") or self._tt_field(u, "szUsername") or str(uid)
+        if ban:
+            ip = self._tt_field(u, "szIPAddress")
+            TeamTalk5._DoBanUser(self._tt, uid, 0)
+            self.bans[str(uid)] = {"nick": nick, "username": self._tt_field(u, "szUsername"),
+                                   "ip": ip, "banned_at": time.time(),
+                                   "by": "telegram" if self._tg_ctx_chat() else "teamtalk"}
+            self._trim_bans()
+            self._save_bans()
+        TeamTalk5._DoKickUser(self._tt, uid, 0)
+        log("%s uid %d (%s)" % ("ban" if ban else "kick", uid, nick))
+        self._send("%s %s." % (nick, "заблокирован по IP и исключён" if ban else "исключён с сервера"))
+
+    def _unban_ip(self, ip):
+        TeamTalk5._DoUnBanUser(self._tt, _b(ip), 0)
+        for k, v in list(self.bans.items()):
+            if isinstance(v, dict) and v.get("ip") == ip:
+                self.bans.pop(k, None)
+        self._save_bans()
+        log("unban %s" % ip)
+        self._send("IP %s разблокирован." % ip)
+
+    def _unban_cmd(self, arg):
+        if arg:
+            a = arg.strip()
+            if re.match(r"^[0-9a-fA-F:.]+$", a) and ("." in a or ":" in a):
+                self._unban_ip(a)
+                return
+            hits = sorted(((v.get("banned_at") or 0, v) for v in list(self.bans.values())
+                           if isinstance(v, dict) and v.get("ip")
+                           and a.lower() in ((v.get("nick") or "").lower(), (v.get("username") or "").lower())),
+                          key=lambda x: x[0], reverse=True)
+            if not hits:
+                self._send("В списке блокировок бота нет «%s». Можно указать IP: /unban 1.2.3.4" % a)
+                return
+            self._unban_ip(hits[0][1]["ip"])
+            return
+        items = sorted(((v.get("banned_at") or 0, k, v) for k, v in list(self.bans.items())
+                        if isinstance(v, dict) and v.get("ip")), key=lambda x: x[0], reverse=True)[:15]
+        if not items:
+            self._send("Список блокировок бота пуст.")
+            return
+        lines = ["Последние блокировки:"]
+        for i, (_, k, v) in enumerate(items, 1):
+            lines.append("%d. %s, %s%s" % (i, v.get("nick") or "(без ника)", v.get("ip"),
+                                           " (автоматически)" if v.get("auto") else ""))
+        lines.append("Разблокировать: /unban <IP или ник>.")
+        chat = self._tg_ctx_chat()
+        if chat:
+            kb = [[{"text": "разблокировать %s" % ((v.get("nick") or v.get("ip")) or "")[:40],
+                    "callback_data": "unban:%s" % k}] for _, k, v in items]
+            self._tg_send(chat, "\n".join(lines), kb)
+        else:
+            self._send("\n".join(lines))
+
+    def _load_bans(self):
+        try:
+            with open(BANS_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            b = d.get("bans") if isinstance(d, dict) and "bans" in d else d
+            return dict(b or {})
+        except Exception:
+            return {}
+
+    def _save_bans(self):
+        try:
+            _atomic_json(BANS_FILE, {"bans": dict(self.bans)})
+        except Exception as e:
+            log("bans save err: %s" % e)
+
+    # ---- переписка TeamTalk <-> Telegram ----
+    def _load_replies(self):
+        try:
+            with open(REPLIES_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            return dict(d.get("replies") or {})
+        except Exception:
+            return {}
+
+    def _save_replies(self):
+        try:
+            now = time.time()
+            with self._rep_lock:
+                for k, v in list(self.pending_replies.items()):
+                    if now - (v.get("last_used_at") or v.get("created_at") or 0) > REPLY_TTL_SEC:
+                        self.pending_replies.pop(k, None)
+                data = {"replies": dict(self.pending_replies)}
+            _atomic_json(REPLIES_FILE, data)
+        except Exception as e:
+            log("replies save err: %s" % e)
+
+    def _tt_pm(self, uid, text):
+        for m in buildTextMessage(text, TextMsgType.MSGTYPE_USER, nToUserID=uid,
+                                  nChannelID=0, nFromUserID=self.my_user_id):
+            self.doTextMessage(m)
+
+    def _tg_pm_to(self, chat, uid, username, nick, text):
+        target = None
+        u = self.users.get(uid) if uid else None
+        if u and (not username or self._tt_field(u, "szUsername") == username):
+            target = uid
+        elif username:
+            cands = [i for i, uu in dict(self.users).items()
+                     if self._tt_field(uu, "szUsername") == username]
+            exact = [i for i in cands if not nick or self._tt_field(self.users[i], "szNickname") == nick]
+            target = (exact or cands or [None])[0]
+        who = nick or username or "Пользователь"
+        if not target:
+            self._tg_send(chat, "%s сейчас не на сервере, сообщение не доставлено." % who)
+            return False
+        self._tt_pm(target, text)
+        self._tg_send(chat, "Отправлено: %s." % who)
+        return True
+
+    def _tg_forward_pm(self, from_uid, msg):
+        """Личное сообщение боту (не команда) — админам в Telegram, на него можно ответить."""
+        if not TG_TOKEN or TG_SEND_ONLY:
+            return
+        u = self.users.get(from_uid)
+        nick = self._tt_field(u, "szNickname") if u else ""
+        uname = self._tt_field(u, "szUsername") if u else ""
+        if uname.lower() in TG_NOTIFY_IGNORE or (nick and nick.lower() in TG_NOTIFY_IGNORE_NICKS):
+            return
+        who = nick or uname or "#%d" % from_uid
+        text = ("Сообщение от %s%s (сервер %s):\n%s\n\nОтветьте на это сообщение, чтобы написать в ответ."
+                % (who, " (%s)" % uname if uname and uname != nick else "", self._server_name(), msg))
+        now = time.time()
+        rec = {"tt_user_id": from_uid, "username": uname, "nick": nick,
+               "created_at": now, "last_used_at": now}
+
+        def _store(res, rec=rec):
+            mid = ((res or {}).get("result") or {}).get("message_id")
+            if mid:
+                with self._rep_lock:
+                    self.pending_replies[str(mid)] = dict(rec)
+                self._save_replies()
+        for aid in self._tg_admin_ids():
+            self._tg_send(aid, text, cb=_store)
+
+    # ---- админы, подписчики, пульт, сетевое сообщение ----
+    def _admins_cmd(self, arg):
+        parts = (arg or "").split()
+        if parts and parts[0] in ("+", "add", "-", "del", "rm", "remove"):
+            if not (self._tg_ctx_chat() and TG_OWNER_USER_ID and self._tg_ctx_user == TG_OWNER_USER_ID):
+                self._send("Менять список админов может только владелец, из Telegram.")
+                return
+            if len(parts) < 2 or not parts[1].isdigit():
+                self._send("Использование: /admins + <Telegram ID> или /admins - <Telegram ID>.")
+                return
+            aid = int(parts[1])
+            if parts[0] in ("+", "add"):
+                if aid not in self.admins:
+                    self.admins.append(aid)
+                    self._save_admins()
+                self._send("Админ добавлен: %d." % aid)
+            elif aid == TG_OWNER_USER_ID:
+                self._send("Владельца убрать нельзя: он задаётся в конфиге.")
+            else:
+                if aid in self.admins:
+                    self.admins.remove(aid)
+                    self._save_admins()
+                self._send("Админ убран: %d." % aid)
+            return
+        lines = ["Владелец: %s" % (TG_OWNER_USER_ID or "не задан"),
+                 "Админы: %s" % (", ".join(str(a) for a in self.admins) if self.admins else "нет"),
+                 "Добавить: /admins + <Telegram ID>, убрать: /admins - <Telegram ID>."]
+        self._send("\n".join(lines))
+
+    def _subs_cmd(self):
+        lines = ["Админы: %s" % ", ".join(str(a) for a in sorted(self._tg_admin_ids()))]
+        subs = sorted(self.sub_active.items(), key=lambda kv: kv[1].get("subscribed_at") or 0)
+        lines.append("Подписки на входы и выходы: %d" % len(subs))
+        for i, (cid, s) in enumerate(subs, 1):
+            tg = s.get("tg_name") or cid
+            if s.get("tg_username"):
+                tg += " @" + s["tg_username"]
+            lines.append("%d. %s, Telegram: %s" % (i, s.get("nick") or s.get("username") or "?", tg))
+        if self.music_subs:
+            lines.append("Подписки на треки: %d" % len(self.music_subs))
+        chat = self._tg_ctx_chat()
+        if chat and subs:
+            kb = [[{"text": "отписать %s" % (s.get("nick") or s.get("username") or cid)[:40],
+                    "callback_data": "unsub:%s" % cid}] for cid, s in subs[:30]]
+            self._tg_send(chat, "\n".join(lines), kb)
+        else:
+            self._send("\n".join(lines))
+
+    def _panel_cmd(self):
+        chat = self._tg_ctx_chat()
+        if not chat:
+            self._send("Пульт доступен только в Telegram: /panel.")
+            return
+        if self.playing and self.current:
+            now = "играет %s%s, громкость %d" % (self.current[1], " (пауза)" if self.paused else "",
+                                                 int(self.volume))
+        else:
+            now = "ничего не играет, громкость %d" % int(self.volume)
+        kb = [
+            [{"text": "назад", "callback_data": "c:prev"},
+             {"text": "пауза или продолжить", "callback_data": "c:play"},
+             {"text": "дальше", "callback_data": "c:next"}],
+            [{"text": "тише", "callback_data": "c:vdown"},
+             {"text": "громче", "callback_data": "c:vup"}],
+            [{"text": "стоп", "callback_data": "c:stop"},
+             {"text": "что играет", "callback_data": "c:status"},
+             {"text": "кто онлайн", "callback_data": "c:online"}],
+        ]
+        self._tg_send(chat, "Пульт. Сейчас %s." % now, kb)
+
+    def _panel_action(self, val):
+        if val == "vup":
+            self._set_volume(int(self.volume) + 10)
+        elif val == "vdown":
+            self._set_volume(int(self.volume) - 10)
+        elif val in ("prev", "play", "next", "stop", "status", "online", "skip"):
+            self._handle_cmd(val, 0)
+
+    def _net_cmd(self, body):
+        if not body:
+            self._send("Использование: /net <текст>")
+            return
+        for m in buildTextMessage(body, TextMsgType.MSGTYPE_BROADCAST, 0):
+            self.doTextMessage(m)
+        self._send("Сетевое сообщение отправлено.")
+
+    def _extra_cmd(self, cmd, text, first, from_user):
+        """Команды, вырезанные при чистке. True — команда обработана."""
+        raw = (text or "").strip()
+        if raw.startswith("/"):
+            raw = raw[1:].strip()
+        rparts = raw.split(None, 1)
+        arg = rparts[1].strip() if len(rparts) > 1 else ""
+        if cmd in ("v", "volume"):
+            self._send("Громкость: %d%%. Изменить: /volume <1-100>." % int(self.volume))
+            return True
+        if first in ("online", "who"):
+            self._online_cmd()
+        elif first == "sub":
+            self._sub_cmd(from_user, mus=arg.lower() in ("mus", "music", "музыка"))
+        elif first == "unsub":
+            self._unsub_tt(from_user)
+        elif first == "kick":
+            self._kick_cmd(arg, ban=False)
+        elif first == "ban":
+            self._kick_cmd(arg, ban=True)
+        elif first == "unban":
+            self._unban_cmd(arg)
+        elif first == "net":
+            self._net_cmd(arg)
+        elif first == "admins":
+            self._admins_cmd(arg)
+        elif first == "subs":
+            self._subs_cmd()
+        elif first in ("panel", "пульт"):
+            self._panel_cmd()
+        else:
+            return False
+        return True
+
+
     def _tg_send_notify(self, text, chat_id):
         """Send a Telegram notification in a background thread (don't block the audio loop)."""
         def _do():
@@ -3125,9 +3964,8 @@ class MusicBot(TeamTalk5.TeamTalk):
                 t: p for t, p in self.sub_pending.items()
                 if p.get("created", 0) > now - SUB_TTL_SEC
             }
-            with open(SUBS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"pending": self.sub_pending, "active": self.sub_active},
-                          f, ensure_ascii=False, indent=2)
+            _atomic_json(SUBS_FILE,
+                         {"pending": dict(self.sub_pending), "active": dict(self.sub_active)})
         except Exception as e:
             log("subs save err: %s" % e)
 
@@ -3142,8 +3980,7 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _save_admins(self):
         try:
-            with open(ADMINS_FILE, "w", encoding="utf-8") as f:
-                json.dump({"admins": self.admins}, f, ensure_ascii=False, indent=2)
+            _atomic_json(ADMINS_FILE, {"admins": list(self.admins)})
         except Exception as e:
             log("admins save err: %s" % e)
 
@@ -3251,8 +4088,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         """Играет ли сейчас звук в канал: трек ИЛИ живой поток (радио).
 
         У радио self.playing остаётся False: поток бесконечный, прогресс по
-        нему не считается. Одного флага мало — иначе приветствие решает, что
-        музыки нет, глушит поток и после фразы тишина. Смотрим ещё на
+        нему не считается. Одного флага мало, поэтому смотрим ещё на
         cur_source с признаком radio и на живой поток отправки.
         """
         try:
@@ -3376,9 +4212,12 @@ class MusicBot(TeamTalk5.TeamTalk):
             if not self._is_tt_command(msg):
                 bare = self._bare_link(msg)
                 if bare:
+                    if self._url_denied(bare, textmessage.nFromUserID):
+                        return
                     self._handle_url(bare, bare)
                     return
-                return  # пересылка сообщений админам вырезана в lite-сборке
+                self._tg_forward_pm(textmessage.nFromUserID, msg)
+                return
             self._handle_cmd(msg, textmessage.nFromUserID)
         except Exception as e:
             log("handle msg error: %s" % e)
@@ -3474,38 +4313,10 @@ class MusicBot(TeamTalk5.TeamTalk):
                     _, run, path = item
                     if run != self._voice_run:
                         continue  # устаревшее событие остановленного/заменённого голоса
-                    if self._announce_pending:
-                        tpath, offset = self._announce_pending
-                        self._announce_pending = None
-                        # закончилась озвучка названия — стартуем сам трек
-                        self._start_voice(tpath, offset)
-                        if self.current:
-                            self._music_broadcast(tpath, self.current[1])
-                    else:
-                        self._advance(silent=True)
-                elif kind == "announce_ready":
-                    _, path, ann = item
-                    pending = self._announce_pending
-                    if not pending or pending[0] != path:
-                        # трек остановлен/заменён, пока шёл синтез — озвучка не нужна
-                        try:
-                            os.remove(ann)
-                        except Exception:
-                            pass
-                        continue
-                    self._start_voice(ann, 0)  # озвучка; трек стартует по её завершении
-                elif kind == "announce_failed":
-                    _, path, title = item
-                    pending = self._announce_pending
-                    if not pending or pending[0] != path:
-                        continue  # трек уже неактуален
-                    self._announce_pending = None
-                    self._start_voice(path, 0)  # озвучка не вышла — играем трек сразу
-                    if self.current and self.current[1] == title:
-                        self._music_broadcast(path, title)
+                    self._advance(silent=True)
                 elif kind == "voice_error":
                     _, msg = item
-                    self._send("Ошибка озвучки: %s" % msg)
+                    self._send("Ошибка воспроизведения: %s" % msg)
                     self._advance()
                 elif kind == "status":
                     _, msg = item
@@ -3513,6 +4324,11 @@ class MusicBot(TeamTalk5.TeamTalk):
                 elif kind == "local_file":
                     _, path, title = item
                     self._play_local(path, title)
+                elif kind == "tg_update":
+                    self._tg_on_update(item[1])
+                elif kind == "tg_file":
+                    _, chat, path, title = item
+                    self._tg_play_file(chat, path, title)
                 elif kind == "restart":
                     _, path, offset = item
                     self._start_voice(path, int(offset))
@@ -3569,6 +4385,8 @@ def main():
                 "user_rights": REG_USER_RIGHTS,
                 "state_file": os.path.join(BASE_DIR, "register_requests.json"),
                 "log_fn": log,
+                # тот же токен, что у плагина: апдейты ему раздаёт плагин, свой опрос не нужен
+                "external_updates": bot._reg_shared(),
             })
             if bot._registrar:
                 log("registrar: модуль регистрации запущен")

@@ -21,7 +21,7 @@ usage() {
 Установка TeamTalk Universal Plugin по компонентам.
 
   all                    всё подряд: зависимости, конфигуратор, сервис
-  deps                   зависимости: apt, .venv, Deno, Silero TTS, TeamTalk SDK
+  deps                   зависимости: apt, .venv, Deno, TeamTalk SDK
   deps --check           только проверить, что уже стоит
   config                 конфигуратор: вопросы и .secrets/.env
   service                systemd-сервис, автозапуск, запуск бота

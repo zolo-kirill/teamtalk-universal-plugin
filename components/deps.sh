@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Компонент: зависимости.
-# apt-пакеты, python-окружение (.venv), Deno, Silero TTS (torch), TeamTalk SDK.
+# apt-пакеты, python-окружение (.venv), Deno, TeamTalk SDK.
 #
 #   bash components/deps.sh          поставить всё
 #   bash components/deps.sh --check  только проверить, что уже стоит
@@ -78,25 +78,7 @@ else
     say "  Deno не найден (для YouTube необязателен, но полезен)."
 fi
 
-# ---- 4. Silero TTS (torch) ----
-if "$PY" -c "import torch" >/dev/null 2>&1; then
-    say "  Silero TTS: torch уже стоит"
-elif [ "$CHECK_ONLY" = 0 ]; then
-    local_voice="n"
-    ask_yn local_voice "  Поставить голосовое приветствие (Silero TTS, ~200 МБ)" y
-    if [ "$local_voice" = "y" ]; then
-        say "  Ставлю torch (CPU) и numpy..."
-        if run "$PY" -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu torch numpy; then
-            say "  Silero TTS: готово, голос задаётся в welcome.voice_speaker"
-        else
-            say "  !! torch не установился — голосовое приветствие будет молчать."
-        fi
-    fi
-else
-    say "  Silero TTS: torch не стоит (голосовые приветствия будут молчать)."
-fi
-
-# ---- 5. TeamTalk SDK ----
+# ---- 4. TeamTalk SDK ----
 say ""
 say "== TeamTalk SDK =="
 SDK_LIB=""

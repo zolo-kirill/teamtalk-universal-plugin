@@ -32,11 +32,6 @@ if [ -f "$UNIT" ]; then
         say "  Останавливаю сервис..."
         run systemctl --user stop "$UNIT_NAME" || true
         run systemctl --user disable "$UNIT_NAME" || true
-        if [ -f "$UNIT_DIR/tt-plugin-tts.service" ]; then
-            run systemctl --user disable --now tt-plugin-tts.service || true
-            run rm -f "$UNIT_DIR/tt-plugin-tts.service"
-            say "  Воркер синтеза речи остановлен."
-        fi
     fi
     run rm -f "$UNIT"
     if [ -d "/run/systemd/system" ]; then

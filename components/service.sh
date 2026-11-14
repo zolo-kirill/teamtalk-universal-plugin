@@ -17,7 +17,6 @@ require_non_root
 ensure_repo || exit 1
 
 UNIT_SRC="$REPO_DIR/tt-plugin.service"
-TTS_SRC="$REPO_DIR/tt-plugin-tts.service"
 TPL_SRC="$REPO_DIR/ttplugin@.service.in"
 
 say ""
@@ -36,20 +35,6 @@ if [ -d "/run/systemd/system" ] && [ -f "$UNIT_SRC" ]; then
     run systemctl --user enable "$UNIT_NAME"
     say "  Запускаю бота..."
     run systemctl --user start "$UNIT_NAME"
-
-    # Воркер синтеза речи: отдельный процесс, потому что torch в одном
-    # процессе с TeamTalk SDK падает в segfault (проверено на практике).
-    if [ -f "$TTS_SRC" ] && [ -x "$REPO_DIR/.venv/bin/python" ] \
-       && "$REPO_DIR/.venv/bin/python" -c "import torch" >/dev/null 2>&1; then
-        if [ "$DRY_RUN" = "1" ]; then
-            say "    [проверка] $TTS_SRC -> $UNIT_DIR/tt-plugin-tts.service"
-        else
-            sed -e "s|__DIR__|$REPO_DIR|g" "$TTS_SRC" > "$UNIT_DIR/tt-plugin-tts.service"
-        fi
-        run systemctl --user daemon-reload
-        run systemctl --user enable --now tt-plugin-tts.service
-        say "  Голосовое приветствие: воркер синтеза (tt-plugin-tts) запущен"
-    fi
 
     if command -v loginctl >/dev/null 2>&1; then
         run sudo loginctl enable-linger "$(id -un)" \
