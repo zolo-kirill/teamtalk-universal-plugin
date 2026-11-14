@@ -1,6 +1,11 @@
 __pycache__/
 *.pyc
+.venv/
 .secrets/
 config.json
-tts/voice_cmd.json
+sdk/current
+*.log
 *.bak-*
+tg_bridge.last
+register_requests.json
+reply_state.json

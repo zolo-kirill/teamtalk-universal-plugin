@@ -62,28 +62,6 @@ YT_PROXY = os.environ.get("YT_PROXY", "").strip()
 # через него (домашний интернет), иначе — обычным каналом. Формат как у yt-dlp,
 # например socks5://127.0.0.1:1080
 YT_TUNNEL = os.environ.get("YT_TUNNEL", "").strip()
-_TG_OPENER = None
-
-
-def _tunnel_proxy():
-    """Домашний/RU-туннель, если он сейчас реально поднят.
-
-    Возвращает строку YT_TUNNEL только когда порт отвечает, иначе пустую строку.
-    Нужен там, где прямой выход заведомо заблокирован по гео (Rutube): там
-    нельзя откатываться на зарубежный мост, но и подниматься на мёртвый туннель
-    тоже бессмысленно — yt-dlp просто упадёт по таймауту.
-    """
-    if not YT_TUNNEL:
-        return ""
-    m = re.match(r"^socks5h?://([^:/]+):(\d+)", YT_TUNNEL)
-    if not m:
-        return ""
-    host, port = m.group(1), int(m.group(2))
-    try:
-        with socket.create_connection((host, port), timeout=0.5):
-            return YT_TUNNEL
-    except OSError:
-        return ""
 
 
 def _yt_proxy():
@@ -186,14 +164,6 @@ def _tg_urlopen(req, timeout):
             if attempt == 2:
                 raise
 
-# Признаки ботнет-клиентов: массовые входы «мёртвых» ботов
-# Флуд-ники вида «🤖 Shadow_Pilot_46»: эмодзи + латинское слово_слово_число.
-# Кириллические ники и одиночные подчёркивания («kirill_mobile») не трогаем.
-_EMOJI_RE = re.compile(
-    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U00002B00-\U00002BFF\U00002190-\U000021FF\U0000FE0F\U00002300-\U000023FF]"
-)
-_BOTNET_WORD_RE = re.compile(r"[A-Za-z]{2,}_[A-Za-z0-9]{1,}(?:_[0-9]{1,})?")
-
 
 def _deep_merge(base, over):
     out = dict(base or {})
@@ -235,26 +205,6 @@ def _cfg(path, env=None, default=None):
     if env and env in os.environ and os.environ.get(env) != "":
         return os.environ[env]
     return default
-
-_CYR_DIGRAPHS = (
-    ("sch", "щ"), ("tch", "ч"), ("dzh", "дж"), ("sh", "ш"), ("ch", "ч"),
-    ("th", "т"), ("ph", "ф"), ("kh", "х"), ("zh", "ж"), ("ck", "к"),
-    ("qu", "кв"), ("kn", "н"), ("wh", "в"), ("wr", "р"),
-    ("ight", "айт"), ("igh", "ай"), ("eigh", "эй"),
-    ("oo", "у"), ("ee", "и"), ("ea", "и"), ("ay", "эй"), ("ey", "эй"),
-    ("oy", "ой"), ("ai", "эй"), ("ei", "эй"), ("ou", "ау"), ("ow", "оу"),
-    ("ya", "я"), ("yu", "ю"), ("yo", "ё"), ("ye", "е"),
-    ("ce", "се"), ("ci", "си"), ("cy", "си"),
-)
-_CYR_LETTERS = {
-    "a": "а", "b": "б", "c": "к", "d": "д", "e": "е", "f": "ф", "g": "г",
-    "h": "х", "i": "и", "j": "дж", "k": "к", "l": "л", "m": "м", "n": "н",
-    "o": "о", "p": "п", "q": "к", "r": "р", "s": "с", "t": "т", "u": "у",
-    "v": "в", "w": "в", "x": "кс", "y": "й", "z": "з",
-}
-
-
-_STATE_LOCK = threading.Lock()
 
 
 def _atomic_json(path, data, mode=0o600):
@@ -360,22 +310,7 @@ TG_NOTIFY_IGNORE_NICKS = {n.strip().lower() for n in (_cfg("telegram.ignore_nick
 TG_NOTIFY_IGNORE.add("stats")
 TG_NOTIFY_IGNORE_NICKS.add("stats")
 
-# Слежение за правами учёток (account_watch): если у учётки изменились права —
-# добавили/убрали разрешение или сменился тип — всех, кто сейчас залогинен под
-# ней, выкидываем, чтобы перезашли и получили новые права. Сервер применяет
-# права учётки при логине; живая сессия держит старые до переподключения.
-ACC_WATCH_ENABLED  = bool(_cfg("account_watch.enabled", None, True))
-ACC_WATCH_INTERVAL = int(_cfg("account_watch.interval_sec", None, 10) or 10)
-ACC_WATCH_PAGE     = int(_cfg("account_watch.page_size", None, 50) or 50)
-ACC_WATCH_NOTIFY   = bool(_cfg("account_watch.notify_owner", None, True))
-# Пауза между личным предупреждением и киком: человек должен успеть прочитать,
-# зачем его выбрасывает. 0 — кикать сразу (account_watch.notice_delay_sec).
-ACC_WATCH_NOTICE_DELAY = float(_cfg("account_watch.notice_delay_sec", None, 5) or 5)
-ACC_WATCH_NOTICE_TEXT  = ("Права учётной записи изменились. "
-                          "Войдите на сервер заново, чтобы они вступили в силу.")
 
-# Приглушение эфира на время голосового из Телеграма (music.voice_duck)
-VOICE_FILE_DUCK = float(_cfg("music.voice_duck", None, 0.2) or 0.2)
 # Прямые трансляции. Twitch отдаёт HLS только по внутреннему GQL-запросу
 # (публичный Client-ID веб-плеера, без входа в аккаунт), Kick — через свой
 # открытый API канала. yt-dlp для Kick не годится, для Twitch требует входа.
@@ -565,12 +500,7 @@ def _start_nightly_restart():
             _restart_bot_soon()
     threading.Thread(target=loop, daemon=True).start()
 
-_YTDLP_UPDATE_STAMP = os.path.join(BASE_DIR, ".ytdlp_update")
 
-
-GEO_CACHE = {}
-GEO_CACHE_TTL = 6 * 3600
-GEO_CACHE_MAX = 500
 TG_MUSIC_TOKEN = str(_cfg("telegram.music_token", "TG_MUSIC_TOKEN", "")).strip()
 REG_ENABLED = bool(_cfg("registration.enabled", None, False))
 REG_TOKEN = str(_cfg("registration.token", "TG_REG_TOKEN", "")).strip()
@@ -734,16 +664,6 @@ class MusicBot(TeamTalk5.TeamTalk):
     def doTextMessage(self, msg):
         return TeamTalk5._DoTextMessage(self._tt, byref(msg))
 
-    def startStreamingMediaFileToChannel(self, path, video_codec=None):
-        return TeamTalk5._StartStreamingMediaFileToChannel(self._tt, _b(path), video_codec)
-
-    def startStreamingMediaFileToChannelEx(self, path, playback, video_codec=None):
-        return TeamTalk5._StartStreamingMediaFileToChannelEx(
-            self._tt, _b(path), byref(playback), video_codec
-        )
-
-    def updateStreamingMediaFileToChannel(self, playback):
-        return TeamTalk5._UpdateStreamingMediaFileToChannel(self._tt, byref(playback), None)
 
     def insertAudioBlock(self, block):
         return TeamTalk5._InsertAudioBlock(self._tt, block)
@@ -918,11 +838,6 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception as e:
             log("music subs save err: %s" % e)
 
-    def _tg_send_text(self, chat_id, text):
-        try:
-            self._tg_api("sendMessage", chat_id=chat_id, text=text[:4000])
-        except Exception as e:
-            log("tg send err: %s" % str(e)[:120])
 
     # Инлайн-клавиатуры для управления подписчиками
 
@@ -2021,26 +1936,6 @@ class MusicBot(TeamTalk5.TeamTalk):
         self._start_voice(path, 0)
         self._music_broadcast(path, title)  # раздать трек подписчикам музыки (в фоне)
 
-    def _file_to_pcm(self, path):
-        """Файл (mp3/ogg/m4a) -> s16le стерео 48 кГц для подмешивания в эфир."""
-        try:
-            cmd = ["ffmpeg", "-v", "error", "-i", str(path), "-vn",
-                   "-f", "s16le", "-acodec", "pcm_s16le",
-                   "-ar", str(VOICE_RATE), "-ac", str(VOICE_CHANNELS), "-"]
-            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               timeout=300)
-            data = p.stdout or b""
-            frame = VOICE_CHANNELS * 2
-            if len(data) % frame:
-                data = data[:len(data) - (len(data) % frame)]
-            if not data:
-                err = (p.stderr or b"")[:200].decode("utf-8", "replace")
-                log("voice_file: пустое аудио (%s)" % err)
-                return None
-            return data
-        except Exception as e:
-            log("voice_file: decode err: %s" % str(e)[:150])
-            return None
 
     def _play_local(self, path, title):
         """Play a local file (no download) — used for files sent via Telegram."""
@@ -2467,12 +2362,6 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception as e:
             log("resume last err: %s" % e)
 
-    def _run_resume_last(self):
-        time.sleep(5)
-        try:
-            self._resume_last()
-        except Exception as e:
-            log("resume thread err: %s" % e)
 
     def _run_startup_playback(self):
         """Что играть при старте бота.
@@ -2550,15 +2439,6 @@ class MusicBot(TeamTalk5.TeamTalk):
         "channel", "u", "link", "url", "mow", "волна",
     ])
 
-    def _is_known_cmd(self, text):
-        """Первый токен (со слешем или без) — известная команда бота."""
-        t = (text or "").strip()
-        if not t:
-            return False
-        if t.startswith("/"):
-            t = t[1:].strip()
-        parts = t.split(None, 1)
-        return bool(parts and parts[0].lower() in self._TG_KNOWN_CMDS)
 
     def _url_denied(self, url, from_user):
         """Не-админ TeamTalk прислал ссылку на внутренний адрес — отказ."""
@@ -4077,23 +3957,6 @@ class MusicBot(TeamTalk5.TeamTalk):
         except Exception as e:
             log("notify join/leave err: %s" % str(e)[:150])
 
-    def _audio_active(self):
-        """Играет ли сейчас звук в канал: трек ИЛИ живой поток (радио).
-
-        У радио self.playing остаётся False: поток бесконечный, прогресс по
-        нему не считается. Одного флага мало, поэтому смотрим ещё на
-        cur_source с признаком radio и на живой поток отправки.
-        """
-        try:
-            if self.playing and not self.paused:
-                return True
-            cs = self.cur_source
-            t = self.voice_thread
-            if cs and len(cs) >= 3 and cs[2] and t is not None and t.is_alive():
-                return True
-        except Exception:
-            pass
-        return False
 
     def _trim_bans(self):
         """Авто-баны не копим бесконечно: свыше 1200 записей режем старые авто до 800."""

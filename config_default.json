@@ -54,74 +54,10 @@
     "admin_nickname": "регистратор",
     "user_rights": 0
   },
-  "account_watch": {
-    "enabled": true,
-    "interval_sec": 10,
-    "notify_owner": true
-  },
   "guard": {
-    "enabled": true,
     "guest_logins": [
       "1"
-    ],
-    "notify": true,
-    "geo": {
-      "enabled": false,
-      "allow_countries": [
-        "RU"
-      ],
-      "ranges_file": "geo/ru_ipv4.txt"
-    },
-    "botnet_nick_check": true,
-    "kick_empty_nick": true,
-    "kick_empty_nick_all": true,
-    "kick_empty_nick_ban": true,
-    "max_nick_len": 40,
-    "mat_check": true,
-    "mat_words": [
-      "пизд",
-      "хуй",
-      "хуе",
-      "хуя",
-      "бля",
-      "еба",
-      "ебл",
-      "ебн",
-      "ебок",
-      "заеб",
-      "наеб",
-      "поеб",
-      "говн",
-      "гандон",
-      "залуп",
-      "шлюх",
-      "дроч",
-      "манд",
-      "мудак",
-      "мудач",
-      "пидор",
-      "пидр",
-      "сука",
-      "суки",
-      "суку",
-      "херн",
-      "херо"
-    ],
-    "burst_enabled": true,
-    "burst": {
-      "window_sec": 30,
-      "threshold": 20,
-      "cooldown_sec": 300
-    },
-    "trusted": {
-      "usernames": [],
-      "nicknames": [],
-      "ip_prefixes": [
-        "127.0.0.",
-        "10.",
-        "192.168."
-      ]
-    }
+    ]
   },
   "startup": {
     "resume_last": false,
