@@ -9,3 +9,6 @@ sdk/current
 tg_bridge.last
 register_requests.json
 reply_state.json
+logs/
+launcher.pid
+sdk/tt5sdk_*_win64/

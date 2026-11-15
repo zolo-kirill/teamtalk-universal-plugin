@@ -30,6 +30,7 @@ from TeamTalk5 import (
     UserRight,
     UserType,
     buildTextMessage,
+    ttstr,
 )
 
 # Логин в регистраторе принимается почти любой (просьба владельца). Ограничения
@@ -195,10 +196,10 @@ class _Tt(TeamTalk):
         c = self.reg.cfg
         self.reg.log("регистратор: подключён к %s, логинюсь" % c["hostname"])
         self.doLogin(
-            str(c["tt_nickname"]).encode("utf-8"),
-            str(c["tt_username"]).encode("utf-8"),
-            str(c["tt_password"]).encode("utf-8"),
-            b"teamtalk-universal-plugin",
+            ttstr(str(c["tt_nickname"])),
+            ttstr(str(c["tt_username"])),
+            ttstr(str(c["tt_password"])),
+            ttstr("teamtalk-universal-plugin"),
         )
 
     def onConnectFailed(self):
@@ -453,7 +454,7 @@ class Registrar(object):
         c = self.cfg
         try:
             tt = _Tt(self)
-            if tt.connect(str(c["hostname"]).encode("utf-8"),
+            if tt.connect(ttstr(str(c["hostname"])),
                           int(c["tcp_port"]), int(c["udp_port"])):
                 self.tt = tt
                 self.log("регистратор: соединяюсь с %s:%s" % (c["hostname"], c["tcp_port"]))
@@ -735,13 +736,13 @@ class Registrar(object):
 
     def _issue_create(self, req_id, req, is_admin=False):
         ua = UserAccount()
-        ua.szUsername = req["username"].encode("utf-8")
-        ua.szPassword = req["password"].encode("utf-8")
+        ua.szUsername = ttstr(req["username"])
+        ua.szPassword = ttstr(req["password"])
         ua.uUserType = UserType.USERTYPE_ADMIN if is_admin else UserType.USERTYPE_DEFAULT
         # админ по умолчанию имеет все права (uUserRights=0); обычной учётке
         # выдаём набор из registration.user_rights / DEFAULT_USER_RIGHTS
         ua.uUserRights = 0 if is_admin else self.user_rights
-        ua.szInitChannel = b"/"
+        ua.szInitChannel = ttstr("/")
         try:
             cmd = self.tt.doNewUserAccount(ua)
         except Exception as e:

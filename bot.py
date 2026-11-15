@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from ctypes import byref
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
@@ -32,9 +32,113 @@ import TeamTalk5
 from TeamTalk5 import MediaFileStatus, StreamType, TextMsgType, buildTextMessage
 
 
+WINDOWS = os.name == "nt"
+_NO_WIN = {"creationflags": subprocess.CREATE_NO_WINDOW} if WINDOWS else {}
+_SUBPROC_KW = {"creationflags": subprocess.CREATE_NO_WINDOW} if WINDOWS else {"start_new_session": True}
+
+
 def _b(s):
-    """В ctypes-биндингах TeamTalk строки передаются как UTF-8 (c_char_p)."""
+    """Строка в том виде, которого ждут биндинги SDK: на Linux это UTF-8
+    (c_char_p), на Windows — обычная str (c_wchar_p)."""
+    if WINDOWS:
+        return s.decode("utf-8") if isinstance(s, bytes) else s
     return s.encode("utf-8") if isinstance(s, str) else s
+
+
+def _load_env_file():
+    """Подхватить .secrets/.env, если бота запустили напрямую.
+    run.sh и launcher.py делают то же самое, но прямой запуск
+    python bot.py не должен терять настройки сервера. Значения из
+    окружения главнее: файл только заполняет пустые места."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(base, ".secrets", ".env"),
+                 os.path.join(base, os.pardir, ".secrets", ".env")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            if key.startswith("export "):
+                key = key[len("export "):].strip()
+            if key and key not in os.environ:
+                os.environ[key] = val.strip().strip("\"'")
+        return
+
+
+_load_env_file()
+
+
+def _kill_tree(proc):
+    """Завершить процесс вместе с дочерними (yt-dlp запускает deno)."""
+    try:
+        if WINDOWS:
+            subprocess.call(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **_NO_WIN)
+        else:
+            os.killpg(os.getpgid(proc.pid), 9)
+    except Exception:
+        pass
+    if proc.poll() is None:
+        proc.kill()
+
+
+class _PipeReader:
+    """Чтение из pipe с таймаутом.
+
+    На Linux хватает select(). На Windows select() работает только с
+    сокетами, поэтому pipe вычитывает отдельный поток и складывает куски в
+    очередь. Очередь ограничена, чтобы ffmpeg не декодировал весь файл в
+    память: при полной очереди поток ждёт, и ffmpeg упирается в pipe."""
+
+    def __init__(self, pipe, chunk):
+        self._pipe = pipe
+        self._chunk = chunk
+        self._closed = False
+        self._q = None
+        if WINDOWS:
+            self._q = queue.Queue(maxsize=32)
+            threading.Thread(target=self._pump, daemon=True).start()
+
+    def _pump(self):
+        fd = self._pipe.fileno()
+        while not self._closed:
+            try:
+                data = os.read(fd, self._chunk)
+            except (OSError, ValueError):
+                data = b""
+            while not self._closed:
+                try:
+                    self._q.put(data, timeout=0.5)
+                    break
+                except queue.Full:
+                    pass
+            if not data:
+                return
+
+    def read(self, wait):
+        """Очередной кусок; b"" — поток закончился; None — за wait секунд
+        ничего не пришло."""
+        if self._q is None:
+            ready, _, _ = select.select([self._pipe], [], [], wait)
+            if not ready:
+                return None
+            try:
+                return os.read(self._pipe.fileno(), self._chunk)
+            except OSError:
+                return b""
+        try:
+            return self._q.get(timeout=wait) if wait else self._q.get_nowait()
+        except queue.Empty:
+            return None
+
+    def close(self):
+        self._closed = True
 
 
 def _media_env():
@@ -182,28 +286,35 @@ def _load_json(path):
     except Exception:
         return {}
 
+def _lookup_cfg(root, path):
+    node = root
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return None
+        node = node[part]
+    if isinstance(node, (dict, list)):
+        return node if node else None
+    if node is None or node == "":
+        return None
+    return node
+
+
 CONFIG_PATH = os.environ.get("CONFIG") or os.path.join(BASE_DIR, "config.json")
-CFG = _deep_merge(
-    _load_json(os.path.join(BASE_DIR, "config_default.json")),
-    _load_json(CONFIG_PATH),
-)
+CFG_DEFAULT = _load_json(os.path.join(BASE_DIR, "config_default.json"))
+CFG_USER = _load_json(CONFIG_PATH)
+CFG = _deep_merge(CFG_DEFAULT, CFG_USER)
 
 
 def _cfg(path, env=None, default=None):
-    """Value from CFG by dotted path; env var and default as fallback."""
-    node = CFG
-    for part in path.split("."):
-        if not isinstance(node, dict) or part not in node:
-            node = None
-            break
-        node = node[part]
-    if isinstance(node, (dict, list)):
-        if node:
-            return node
-    elif node is not None and node != "":
-        return node
-    if env and env in os.environ and os.environ.get(env) != "":
+    """Значение из config.json, затем из окружения (.env), затем из config_default.json."""
+    val = _lookup_cfg(CFG_USER, path)
+    if val is not None and not (env and type(val) is int and val == 0 and os.environ.get(env)):
+        return val
+    if env and os.environ.get(env, "") != "":
         return os.environ[env]
+    val = _lookup_cfg(CFG_DEFAULT, path)
+    if val is not None:
+        return val
     return default
 
 
@@ -430,7 +541,7 @@ YT_JS_RUNTIME = os.environ.get("YT_JS_RUNTIME")
 if YT_JS_RUNTIME is None:
     YT_JS_RUNTIME = _cfg("runtime.yt_js_runtime", None, None)
 if not YT_JS_RUNTIME:
-    YT_JS_RUNTIME = shutil.which("deno") or "/home/superlisa/.local/bin/deno"
+    YT_JS_RUNTIME = shutil.which("deno") or ""
 
 # Аргумент extractor-arg для провайдера po_token на YouTube; пусто — не передаём.
 YT_PO_TOKEN = os.environ.get("YT_PO_TOKEN_EXTRACTOR")
@@ -454,6 +565,8 @@ VOICE_CHUNK_BYTES = VOICE_CHUNK * 2 * VOICE_CHANNELS  # s16 interleaved
 # HLS-сегментов канал получает разрыв.
 VOICE_READ_AHEAD = int(VOICE_RATE * VOICE_CHANNELS * 2 * 1.5)  # 1,5 секунды
 VOICE_READ_CHUNK = 65536  # читаем пачками, а не по 20 мс
+# nice, чтобы перекодирование не отнимало процессор у играющего трека
+_LOW_PRIO = [] if WINDOWS else ["nice", "-n", "10"]
 
 # Воспроизведение через PulseAudio: трек играет ffmpeg в указанный sink,
 # а бот записывает его с монитора, так что в канал можно отдать любой
@@ -481,7 +594,11 @@ def _restart_bot_soon():
 
 def _nightly_restart_delay(tzname="Europe/Moscow", hour=3, minute=0):
     """Секунды до ближайшего ночного перезапуска (по московскому времени)."""
-    now = datetime.now(ZoneInfo(tzname))
+    try:
+        tz = ZoneInfo(tzname)
+    except Exception:
+        tz = timezone(timedelta(hours=3))
+    now = datetime.now(tz)
     target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if target <= now:
         target += timedelta(days=1)
@@ -569,7 +686,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         self.nickname = NICKNAME
         self.status_msg = ""
         try:
-            s = open(STATUS_MSG_FILE).read().strip()
+            s = open(STATUS_MSG_FILE, encoding="utf-8").read().strip()
             if s:
                 self.status_msg = s
         except Exception:
@@ -617,13 +734,13 @@ class MusicBot(TeamTalk5.TeamTalk):
 
     def _load_channel_msg(self):
         try:
-            return open(CHANNEL_MSG_FILE).read().strip() == "1"
+            return open(CHANNEL_MSG_FILE, encoding="utf-8").read().strip() == "1"
         except Exception:
             return DEFAULT_CHANNEL_MSG
 
     def _save_channel_msg(self):
         try:
-            with open(CHANNEL_MSG_FILE, "w") as f:
+            with open(CHANNEL_MSG_FILE, "w", encoding="utf-8") as f:
                 f.write("1" if self.channel_msg else "0")
         except Exception as e:
             log("channel_msg save err: %s" % e)
@@ -650,7 +767,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         return a.tobytes()
 
     # Вспомогательные функции
-    # Обёртки над SDK: в ctypes нужны явные байтовые строки
+    # Обёртки над SDK: строки приводятся к типу, которого ждут биндинги
 
     def connect(self, host, tcp, udp, ltcp=0, ludp=0, enc=False):
         return TeamTalk5._Connect(self._tt, _b(host), tcp, udp, ltcp, ludp, enc)
@@ -897,16 +1014,13 @@ class MusicBot(TeamTalk5.TeamTalk):
         """Run yt-dlp, kill the whole process group on timeout (children may be node/js)."""
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, start_new_session=True,
+            text=True, encoding="utf-8", errors="replace", **_SUBPROC_KW,
         )
         try:
             out, err = proc.communicate(timeout=timeout)
             return proc.returncode, out, err
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), 9)
-            except Exception:
-                proc.kill()
+            _kill_tree(proc)
             proc.wait()
             raise
 
@@ -1757,7 +1871,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         bot relays whatever is audible on the machine. Otherwise ffmpeg decodes
         the file straight to raw PCM — no sound devices involved.
         """
-        pulse = PULSE_SINK
+        pulse = "" if WINDOWS else PULSE_SINK  # PulseAudio есть только на Linux
         cap = None  # parec process (pulse mode only)
         try:
             spp = getattr(self, "stream_http_proxy", None) if str(path).startswith(("http://", "https://")) else None
@@ -1772,13 +1886,13 @@ class MusicBot(TeamTalk5.TeamTalk):
                 cmd += ["-i", path, "-vn", "-f", "pulse", pulse]
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    start_new_session=True, env=_media_env(),
+                    env=_media_env(), **_SUBPROC_KW,
                 )
                 cap = subprocess.Popen(
                     ["parec", "--device=%s.monitor" % pulse, "--format=s16le",
                      "--rate", str(VOICE_RATE), "--channels=%d" % VOICE_CHANNELS],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    start_new_session=True, env=_media_env(),
+                    env=_media_env(), **_SUBPROC_KW,
                 )
                 src = cap.stdout
             else:
@@ -1791,13 +1905,14 @@ class MusicBot(TeamTalk5.TeamTalk):
                         "-ar", str(VOICE_RATE), "-"]
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                    start_new_session=True, env=_media_env(),
+                    env=_media_env(), **_SUBPROC_KW,
                 )
                 src = proc.stdout
         except Exception as e:
             self.api_q.put(("voice_error", "ffmpeg: %s" % str(e)[:120]))
             return
         self.voice_proc = proc
+        reader = _PipeReader(src, VOICE_READ_CHUNK)
         stream_id = int(time.time() * 1000) & 0xFFFF
         finished = False
         buf = b""
@@ -1818,13 +1933,9 @@ class MusicBot(TeamTalk5.TeamTalk):
                 # read_ahead, чтобы переждать сетевую заминку.
                 while len(buf) < read_ahead and not self.voice_stop.is_set():
                     wait = 0.1 if len(buf) < VOICE_CHUNK_BYTES else 0
-                    r, _, _ = select.select([src], [], [], wait)
-                    if not r:
+                    data = reader.read(wait)
+                    if data is None:
                         break
-                    try:
-                        data = os.read(src.fileno(), VOICE_READ_CHUNK)
-                    except OSError:
-                        data = b""
                     if not data:
                         finished = True
                         break
@@ -1898,12 +2009,17 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self.insertAudioBlockEnd()
             except Exception:
                 pass
+            reader.close()
             for p in (proc, cap):
                 try:
                     if p is not None and p.poll() is None:
                         p.kill()
                 except Exception:
                     pass
+            try:
+                src.close()
+            except Exception:
+                pass
             log("voice done: blocks=%d finished=%s" % (sent_blocks, finished))
             self.voice_proc = None
             if finished:
@@ -1989,7 +2105,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             "playback": {"default_volume": int(self.volume)},
         })
         try:
-            with open(STATUS_MSG_FILE, "w") as f:
+            with open(STATUS_MSG_FILE, "w", encoding="utf-8") as f:
                 f.write(self.status_msg or "")
         except Exception as e:
             log("status save err: %s" % e)
@@ -2581,7 +2697,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             status = parts[1].strip() if len(parts) > 1 else ""
             self.status_msg = status
             try:
-                with open(STATUS_MSG_FILE, "w") as f:
+                with open(STATUS_MSG_FILE, "w", encoding="utf-8") as f:
                     f.write(status)
             except Exception as e:
                 log("status msg save err: %s" % e)
@@ -2653,12 +2769,11 @@ class MusicBot(TeamTalk5.TeamTalk):
                 self._send("Подготовка mp3…")
                 mp3tmp = os.path.join(CACHE_DIR, "upload_%d_%s.mp3" % (int(time.time() * 1000), safe))
                 try:
-                    # nice, чтобы транскод не отъедал CPU у играющего трека
                     rcc = subprocess.call(
-                        ["nice", "-n", "10", "ffmpeg", "-y", "-i", tmp, "-vn",
+                        _LOW_PRIO + ["ffmpeg", "-y", "-i", tmp, "-vn",
                          "-codec:a", "libmp3lame", "-q:a", "5", mp3tmp],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                        env=_media_env(),
+                        env=_media_env(), **_NO_WIN,
                     )
                 except Exception:
                     rcc = 1
@@ -3089,7 +3204,7 @@ class MusicBot(TeamTalk5.TeamTalk):
             self._br_buf = b""
             self._br_ino = None
             try:
-                self._br_last = int(open(pos_file).read().strip() or 0)
+                self._br_last = int(open(pos_file, encoding="utf-8").read().strip() or 0)
             except Exception:
                 self._br_last = None  # первый запуск: всё, что уже в журнале, пропускаем
         out = []
@@ -3130,7 +3245,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         if top != (self._br_last or 0) or first_run:
             self._br_last = top
             try:
-                with open(pos_file + ".tmp", "w") as f:
+                with open(pos_file + ".tmp", "w", encoding="utf-8") as f:
                     f.write(str(top))
                 os.replace(pos_file + ".tmp", pos_file)
             except Exception:
