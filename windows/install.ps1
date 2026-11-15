@@ -1,151 +1,99 @@
-﻿# Установка TeamTalk Universal Plugin на Windows 10 и 11.
+# Установка TeamTalk Universal Plugin на Windows 10 и 11 в консоли.
 #
-#   install.bat               полная установка с вопросами
-#   install.bat -Unattended   без вопросов: только программы, окружение и SDK
+#   install.bat -Console               установка с вопросами
+#   install.bat -Console -Unattended   без вопросов: программы, окружение и SDK
 #
-# Ставит через winget Python, ffmpeg и Deno, если их нет, создаёт .venv,
-# качает TeamTalk SDK и запускает настройку (windows\setup.py).
-param([switch]$Unattended)
+# Обычный запуск install.bat открывает окно (windows\install-gui.ps1).
+param([switch]$Console, [switch]$Unattended)
 
+$ErrorActionPreference = "Stop"
 $env:PYTHONUTF8 = "1"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 $Root = Split-Path -Parent $PSScriptRoot
-$Venv = Join-Path $Root ".venv"
-$VenvPy = Join-Path $Venv "Scripts\python.exe"
+$Child = Join-Path $PSScriptRoot "install-child.ps1"
 $Setup = Join-Path $Root "windows\setup.py"
 
-function Say($text) { Write-Host $text }
-
-function Test-Tool($name) {
-    return [bool](Get-Command $name -ErrorAction SilentlyContinue)
+function Ask($text, $default = "") {
+    $tail = if ($default) { " [$default]" } else { "" }
+    $answer = Read-Host "  $text$tail"
+    if ($answer) { return $answer.Trim() }
+    return $default
 }
 
-# После winget новые пути видны только новым окнам: дочитываем их из реестра.
-function Update-Path {
-    $parts = @($env:Path -split ';')
-    foreach ($scope in @("Machine", "User")) {
-        $parts += @([Environment]::GetEnvironmentVariable("Path", $scope) -split ';')
-    }
-    $env:Path = (($parts | Where-Object { $_ } | Select-Object -Unique) -join ';')
+function Ask-Secret($text) {
+    $value = Read-Host "  $text" -AsSecureString
+    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($value)
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
 }
 
-function Install-WithWinget($id, $title) {
-    if (-not (Test-Tool "winget")) {
-        Say "  winget не найден, поставить $title автоматически не получится."
-        return
-    }
-    Say "  Ставлю $title через winget..."
-    winget install -e --id $id --accept-source-agreements --accept-package-agreements --disable-interactivity | Out-Null
-    Update-Path
-}
-
-# Путь к python.exe версии 3.10 или новее, иначе пустая строка.
-function Find-Python {
-    $probe = "import sys; sys.version_info >= (3, 10) and print(sys.executable)"
-    foreach ($cmd in @("py", "python", "python3")) {
-        if (-not (Test-Tool $cmd)) { continue }
-        if ($cmd -eq "py") {
-            $found = & $cmd -3 -c $probe 2>$null | Select-Object -First 1
-        } else {
-            $found = & $cmd -c $probe 2>$null | Select-Object -First 1
-        }
-        if ($found -and (Test-Path $found)) { return $found }
-    }
-    return ""
-}
-
-function Ask-Yes($question) {
-    $answer = Read-Host "  $question [Y/n]"
+function Ask-Yes($text) {
+    $answer = Read-Host "  $text [Y/n]"
     return ($answer -notmatch '^\s*[nNнН]')
 }
 
-Say "TeamTalk Universal Plugin: установка на Windows"
-
-Say ""
-Say "== Python =="
-$Py = Find-Python
-if (-not $Py) {
-    Install-WithWinget "Python.Python.3.12" "Python 3.12"
-    $Py = Find-Python
-}
-if (-not $Py) {
-    Say "  !! Python 3.10 или новее не найден."
-    Say "     Скачайте его с https://www.python.org/downloads/, при установке отметьте"
-    Say "     Add python.exe to PATH и запустите install.bat ещё раз."
-    exit 1
-}
-Say "  Python: $Py"
-
-Say ""
-Say "== ffmpeg =="
-$LocalFfmpeg = Join-Path $Root "bin\ffmpeg.exe"
-if (-not (Test-Tool "ffmpeg") -and -not (Test-Path $LocalFfmpeg)) {
-    Install-WithWinget "Gyan.FFmpeg" "ffmpeg"
-}
-if (Test-Tool "ffmpeg") {
-    Say "  ffmpeg: $((Get-Command ffmpeg).Source)"
-} elseif (Test-Path $LocalFfmpeg) {
-    Say "  ffmpeg: $LocalFfmpeg"
-} else {
-    Say "  !! ffmpeg не найден, без него бот не играет звук."
-    Say "     Положите ffmpeg.exe в папку bin рядом с bot.py и запустите install.bat ещё раз."
-}
-
-Say ""
-Say "== Deno =="
-if (-not (Test-Tool "deno") -and -not $Unattended) {
-    if (Ask-Yes "Поставить Deno? С ним yt-dlp надёжнее работает с YouTube") {
-        Install-WithWinget "DenoLand.Deno" "Deno"
-    }
-}
-if (Test-Tool "deno") {
-    Say "  Deno: $((Get-Command deno).Source)"
-} else {
-    Say "  Deno не установлен. Для YouTube он полезен, но необязателен."
-}
-
-Say ""
-Say "== Окружение Python (.venv) =="
-if (-not (Test-Path $VenvPy)) {
-    & $Py -m venv $Venv
-    if (-not (Test-Path $VenvPy)) {
-        Say "  !! Не удалось создать .venv."
-        exit 1
-    }
-}
-& $VenvPy -m pip install --quiet --upgrade pip wheel
-& $VenvPy -m pip install --quiet --upgrade requests yt-dlp yandex-music curl_cffi py7zr tzdata
-if ($LASTEXITCODE -ne 0) {
-    Say "  !! pip завершился с ошибкой, зависимости не установлены."
-    exit 1
-}
-Say "  Зависимости установлены."
-
-Say ""
-Say "== TeamTalk SDK =="
-& $VenvPy $Setup sdk
-if ($LASTEXITCODE -ne 0) { exit 1 }
-
 if ($Unattended) {
-    Say ""
-    Say "Программы и SDK готовы. Настройка: .venv\Scripts\python windows\setup.py config"
-    exit 0
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $Child -Root $Root -Setup $Setup -Deps 1 -Auto 0 -Start 0 -Deno 0
+    exit $LASTEXITCODE
 }
 
-& $VenvPy $Setup config
-if ($LASTEXITCODE -ne 0) { exit 1 }
+Write-Host "TeamTalk Universal Plugin: установка на Windows"
+Write-Host ""
+Write-Host "== Сервер TeamTalk =="
 
-Say ""
-Say "== Запуск =="
-if (Ask-Yes "Запускать бота при входе в Windows?") {
-    & $VenvPy $Setup autostart on
-}
-if (Ask-Yes "Запустить бота сейчас, в фоне?") {
-    & $VenvPy $Setup start
+$hostName = ""
+$login = ""
+$password = ""
+while (-not $hostName -or -not $login -or -not $password) {
+    $hostName = Ask "Адрес сервера или IP"
+    $login = Ask "Логин бота"
+    $password = Ask-Secret "Пароль (ввод не отображается)"
+    if (-not $hostName -or -not $login -or -not $password) {
+        Write-Host "  Адрес, логин и пароль обязательны."
+    }
 }
 
-Say ""
-Say "Готово. Запуск в окне: run.bat. Журнал фонового запуска: logs\bot.log."
-Say "Остановить: .venv\Scripts\python windows\setup.py stop"
-exit 0
+$data = [ordered]@{
+    TEAMTALK_HOST     = $hostName
+    TEAMTALK_TCP_PORT = Ask "TCP-порт" "10333"
+    TEAMTALK_UDP_PORT = Ask "UDP-порт" "10333"
+    TEAMTALK_USERNAME = $login
+    TEAMTALK_PASSWORD = $password
+    TEAMTALK_NICKNAME = Ask "Имя бота (ник)" "!universal bot"
+    TEAMTALK_CHANNEL  = Ask "Канал (пусто — корневой)"
+}
+
+Write-Host ""
+Write-Host "== Telegram =="
+$token = Ask "Токен бота для управления (пусто — пропустить)"
+$data["TG_TOKEN"] = $token
+if ($token) {
+    $data["TG_OWNER_USER_ID"] = Ask "Ваш Telegram ID — владелец (пусто — пропустить)"
+    $data["TG_NOTIFY_CHAT_ID"] = Ask "ID чата для уведомлений (пусто — пропустить)"
+    $data["TG_MUSIC_TOKEN"] = Ask "Токен бота для музыки (пусто — пропустить)"
+    $data["TG_PROXY"] = Ask "Прокси для Telegram, например http://127.0.0.1:8118 (пусто — напрямую)"
+}
+
+Write-Host ""
+Write-Host "== Музыкальные сервисы =="
+$data["YT_COOKIES"] = Ask "Путь к cookies.txt для YouTube (пусто — пропустить)"
+$data["RT_COOKIES"] = Ask "Путь к rutube_cookies.txt (пусто — пропустить)"
+$data["YM_TOKEN"] = Ask "Токен Яндекс Музыки (пусто — пропустить)"
+
+$dir = Join-Path $Root ".secrets"
+if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+$json = Join-Path $dir "install.json"
+($data | ConvertTo-Json) | Set-Content -LiteralPath $json -Encoding UTF8
+
+Write-Host ""
+$auto = if (Ask-Yes "Запускать бота при входе в Windows?") { 1 } else { 0 }
+$deno = if (Ask-Yes "Поставить Deno? С ним yt-dlp надёжнее работает с YouTube") { 1 } else { 0 }
+$startNow = if (Ask-Yes "Запустить бота сейчас, в фоне?") { 1 } else { 0 }
+
+& powershell -NoProfile -ExecutionPolicy Bypass -File $Child -Root $Root -Setup $Setup -Json $json `
+    -Deps 1 -Auto $auto -Start $startNow -Deno $deno
+
+Write-Host ""
+Write-Host "Запуск в окне: run.bat. Журнал: logs\bot.log."
+exit $LASTEXITCODE

@@ -15,6 +15,7 @@ import getpass
 import glob
 import hashlib
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -164,6 +165,63 @@ def protect(path):
         subprocess.call(["icacls", path, "/inheritance:r"], **quiet)
 
 
+ENV_ORDER = [
+    "TEAMTALK_HOST", "TEAMTALK_TCP_PORT", "TEAMTALK_UDP_PORT",
+    "TEAMTALK_USERNAME", "TEAMTALK_PASSWORD", "TEAMTALK_NICKNAME", "TEAMTALK_CHANNEL",
+    "TG_TOKEN", "TG_OWNER_USER_ID", "TG_NOTIFY_CHAT_ID", "TG_MUSIC_TOKEN", "TG_PROXY",
+]
+
+
+def protect_dir(path):
+    """Закрыть папку с настройками от других пользователей системы."""
+    if os.name != "nt":
+        os.chmod(path, 0o700)
+        return
+    user = os.environ.get("USERNAME", "")
+    if os.environ.get("USERDOMAIN"):
+        user = "%s\\%s" % (os.environ["USERDOMAIN"], user)
+    quiet = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if user and subprocess.call(["icacls", path, "/grant:r", "%s:(OI)(CI)F" % user], **quiet) == 0:
+        subprocess.call(["icacls", path, "/inheritance:r"], **quiet)
+
+
+def write_env(values):
+    """Записать .secrets\\.env; прежний файл остаётся рядом копией .bak."""
+    os.makedirs(SECRETS, exist_ok=True)
+    if os.path.isfile(ENV_FILE):
+        shutil.copyfile(ENV_FILE, ENV_FILE + ".bak")
+    with open(ENV_FILE, "w", encoding="utf-8", newline="\n") as f:
+        for key in ENV_ORDER:
+            value = str(values.get(key) or "").strip()
+            if value:
+                f.write("%s=%s\n" % (key, value))
+    protect(ENV_FILE)
+    protect_dir(SECRETS)
+
+
+def cmd_config_json(path):
+    """Как cmd_config, но без вопросов: значения приходят из JSON-файла.
+
+    Так настройки пишет окно установки. Файл с данными удаляется сразу после.
+    """
+    with open(path, encoding="utf-8-sig") as f:
+        values = json.load(f)
+    if not str(values.get("TEAMTALK_HOST") or "").strip():
+        print("  !! В присланных данных нет адреса сервера.")
+        return 1
+    write_env(values)
+    copy_secret(str(values.get("YT_COOKIES") or ""), "cookies.txt")
+    copy_secret(str(values.get("RT_COOKIES") or ""), "rutube_cookies.txt")
+    ym = str(values.get("YM_TOKEN") or "").strip()
+    if ym:
+        target = os.path.join(SECRETS, "ym_token.txt")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(ym + "\n")
+        protect(target)
+    print("  Настройки записаны в %s" % ENV_FILE)
+    return 0
+
+
 def cmd_config():
     if os.path.isfile(ENV_FILE) and not ask_yes("Настройки уже есть. Записать заново?"):
         return 0
@@ -204,14 +262,7 @@ def cmd_config():
     rt_cookies = ask("Путь к rutube_cookies.txt (пусто = пропустить)")
     ym_token = ask("Токен Яндекс Музыки (пусто = пропустить)")
 
-    os.makedirs(SECRETS, exist_ok=True)
-    if os.path.isfile(ENV_FILE):
-        shutil.copyfile(ENV_FILE, ENV_FILE + ".bak")
-    with open(ENV_FILE, "w", encoding="utf-8", newline="\n") as f:
-        for key, value in values:
-            if value:
-                f.write("%s=%s\n" % (key, value))
-    protect(ENV_FILE)
+    write_env(dict(values))
     copy_secret(yt_cookies, "cookies.txt")
     copy_secret(rt_cookies, "rutube_cookies.txt")
     if ym_token:
@@ -317,6 +368,8 @@ def main():
     if cmd == "sdk":
         return cmd_sdk()
     if cmd == "config":
+        if len(args) > 2 and args[1] == "--json":
+            return cmd_config_json(args[2])
         return cmd_config()
     if cmd in ("autostart", "start", "stop", "status"):
         if os.name != "nt":
