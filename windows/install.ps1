@@ -71,7 +71,6 @@ $data["TG_TOKEN"] = $token
 if ($token) {
     $data["TG_OWNER_USER_ID"] = Ask "Ваш Telegram ID — владелец (пусто — пропустить)"
     $data["TG_NOTIFY_CHAT_ID"] = Ask "ID чата для уведомлений (пусто — пропустить)"
-    $data["TG_MUSIC_TOKEN"] = Ask "Токен бота для музыки (пусто — пропустить)"
     $data["TG_PROXY"] = Ask "Прокси для Telegram, например http://127.0.0.1:8118 (пусто — напрямую)"
 }
 

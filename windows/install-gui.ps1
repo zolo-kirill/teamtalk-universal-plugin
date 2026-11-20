@@ -131,37 +131,36 @@ Add-Header $panel 258 "Telegram"
 Add-Field $panel 288 "Токен бота для управления" "token" (Saved "TG_TOKEN" "") -Secret
 Add-Field $panel 318 "Ваш Telegram ID (владелец)" "owner" (Saved "TG_OWNER_USER_ID" "")
 Add-Field $panel 348 "ID чата для уведомлений" "notify" (Saved "TG_NOTIFY_CHAT_ID" "")
-Add-Field $panel 378 "Токен бота для музыки" "music" (Saved "TG_MUSIC_TOKEN" "") -Secret
-Add-Field $panel 408 "Прокси для Telegram" "proxy" (Saved "TG_PROXY" "")
+Add-Field $panel 378 "Прокси для Telegram" "proxy" (Saved "TG_PROXY" "")
 
-Add-Header $panel 446 "Музыкальные сервисы"
-Add-FileField $panel 476 "cookies.txt для YouTube" "ytc"
-Add-FileField $panel 506 "rutube_cookies.txt" "rtc"
-Add-Field $panel 536 "Токен Яндекс Музыки" "ym" "" -Secret
+Add-Header $panel 416 "Музыкальные сервисы"
+Add-FileField $panel 446 "cookies.txt для YouTube" "ytc"
+Add-FileField $panel 476 "rutube_cookies.txt" "rtc"
+Add-Field $panel 506 "Токен Яндекс Музыки" "ym" "" -Secret
 
-Add-Header $panel 574 "Что сделать"
+Add-Header $panel 544 "Что сделать"
 
 $chkDeps = New-Object Windows.Forms.CheckBox
 $chkDeps.Text = "Поставить Python, ffmpeg и зависимости в .venv"
-$chkDeps.SetBounds(20, 602, 580, 24)
+$chkDeps.SetBounds(20, 572, 580, 24)
 $chkDeps.Checked = $true
 $panel.Controls.Add($chkDeps)
 
 $chkDeno = New-Object Windows.Forms.CheckBox
 $chkDeno.Text = "Поставить Deno (помогает yt-dlp с YouTube)"
-$chkDeno.SetBounds(20, 628, 580, 24)
+$chkDeno.SetBounds(20, 598, 580, 24)
 $chkDeno.Checked = $true
 $panel.Controls.Add($chkDeno)
 
 $chkAuto = New-Object Windows.Forms.CheckBox
 $chkAuto.Text = "Запускать бота при входе в Windows"
-$chkAuto.SetBounds(20, 654, 580, 24)
+$chkAuto.SetBounds(20, 624, 580, 24)
 $chkAuto.Checked = $true
 $panel.Controls.Add($chkAuto)
 
 $chkStart = New-Object Windows.Forms.CheckBox
 $chkStart.Text = "Запустить бота сразу после установки"
-$chkStart.SetBounds(20, 680, 580, 24)
+$chkStart.SetBounds(20, 650, 580, 24)
 $chkStart.Checked = $true
 $panel.Controls.Add($chkStart)
 
@@ -293,7 +292,6 @@ $btnInstall.Add_Click({
         TG_TOKEN          = $script:fields["token"].Text.Trim()
         TG_OWNER_USER_ID  = $script:fields["owner"].Text.Trim()
         TG_NOTIFY_CHAT_ID = $script:fields["notify"].Text.Trim()
-        TG_MUSIC_TOKEN    = $script:fields["music"].Text.Trim()
         TG_PROXY          = $script:fields["proxy"].Text.Trim()
         YT_COOKIES        = $script:fields["ytc"].Text.Trim()
         RT_COOKIES        = $script:fields["rtc"].Text.Trim()

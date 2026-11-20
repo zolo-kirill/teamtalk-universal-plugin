@@ -168,7 +168,7 @@ def protect(path):
 ENV_ORDER = [
     "TEAMTALK_HOST", "TEAMTALK_TCP_PORT", "TEAMTALK_UDP_PORT",
     "TEAMTALK_USERNAME", "TEAMTALK_PASSWORD", "TEAMTALK_NICKNAME", "TEAMTALK_CHANNEL",
-    "TG_TOKEN", "TG_OWNER_USER_ID", "TG_NOTIFY_CHAT_ID", "TG_MUSIC_TOKEN", "TG_PROXY",
+    "TG_TOKEN", "TG_OWNER_USER_ID", "TG_NOTIFY_CHAT_ID", "TG_PROXY",
 ]
 
 
@@ -253,7 +253,6 @@ def cmd_config():
         values += [
             ("TG_OWNER_USER_ID", ask("Ваш Telegram ID — владелец (пусто = пропустить)")),
             ("TG_NOTIFY_CHAT_ID", ask("ID чата для уведомлений о входе и выходе (пусто = пропустить)")),
-            ("TG_MUSIC_TOKEN", ask("Токен бота для музыки (пусто = пропустить)")),
             ("TG_PROXY", ask("Прокси для Telegram, например http://127.0.0.1:8118 (пусто = напрямую)")),
         ]
     print("")

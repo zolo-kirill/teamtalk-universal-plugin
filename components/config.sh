@@ -25,7 +25,6 @@ TEAMTALK_CHANNEL=""
 TG_TOKEN=""
 TG_OWNER_USER_ID=""
 TG_NOTIFY_CHAT_ID=""
-TG_MUSIC_TOKEN=""
 TG_PROXY_VAL=""
 YT_COOKIES=""
 RT_COOKIES=""
@@ -61,7 +60,6 @@ ask TG_TOKEN "  Токен бота для реле-команд (пусто = �
 if [ -n "$TG_TOKEN" ]; then
     ask TG_OWNER_USER_ID "  Ваш Telegram ID — владелец (пусто = пропустить)" ""
     ask TG_NOTIFY_CHAT_ID "  ID чата для уведомлений о входе/выходе (пусто = пропустить)" ""
-    ask TG_MUSIC_TOKEN "  Токен бота для музыки (пусто = пропустить)" ""
 fi
 
 # ---- 3. Медиа ----
@@ -114,7 +112,6 @@ else
         [ -n "$TG_TOKEN" ]          && say "TG_TOKEN=$(q "$TG_TOKEN")"
         [ -n "$TG_OWNER_USER_ID" ]  && say "TG_OWNER_USER_ID=$(q "$TG_OWNER_USER_ID")"
         [ -n "$TG_NOTIFY_CHAT_ID" ] && say "TG_NOTIFY_CHAT_ID=$(q "$TG_NOTIFY_CHAT_ID")"
-        [ -n "$TG_MUSIC_TOKEN" ]    && say "TG_MUSIC_TOKEN=$(q "$TG_MUSIC_TOKEN")"
     } > "$ENV_FILE"
     chmod 600 "$ENV_FILE" 2>/dev/null || true
     say "  Конфигурация записана: $ENV_FILE"
