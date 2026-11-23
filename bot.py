@@ -3018,7 +3018,7 @@ class MusicBot(TeamTalk5.TeamTalk):
         head = parts[0].lower().split("@", 1)[0] if parts else ""
         arg = parts[1].strip() if len(parts) > 1 else ""
         if reg is not None:
-            if head in ("/register", "/create") or (head == "/start" and not arg.startswith("sub_")):
+            if head in ("/register", "/create", "/unblock", "/blocklist", "/blacklist") or (head == "/start" and not arg.startswith("sub_")):
                 return "reg"
             if text and not text.startswith("/") and (reg.conv.get(uid) or {}).get("step"):
                 return "reg"

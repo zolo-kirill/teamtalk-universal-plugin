@@ -46,6 +46,10 @@ from TeamTalk5 import (
 USERNAME_MAX_BYTES = 511
 CREATE_TIMEOUT_SEC = 10
 
+# Что видит человек, чья заявка была отклонена
+BLOCKED_TEXT = ("Твоя заявка на регистрацию отклонена администратором сервера.\n"
+                "Аккаунт заблокирован в боте: подать новую заявку здесь больше нельзя.")
+
 # Telegram API ходит через локальный прокси, если он задан в окружении
 # (TG_PROXY): дата-центр сервера DPI-блокирует исходящие TCP к подсетям
 # Telegram, поэтому прямой urlopen отсюда не работает. См. bot.py.
@@ -143,7 +147,7 @@ def _urlopen(req, timeout):
     for attempt in (1, 2):
         try:
             r = _session().request(req.get_method(), req.full_url, data=data,
-                                   headers=headers, timeout=timeout)
+                                   headers=headers, timeout=(5, timeout))
             r.raise_for_status()
             return _Resp(r)
         except requests.RequestException:
@@ -272,6 +276,8 @@ class Registrar(object):
         ]
         if self.admin_ids:
             commands.append({"command": "create", "description": "Создать учётную запись (админ)"})
+            commands.append({"command": "unblock", "description": "Убрать из чёрного списка (админ)"})
+            commands.append({"command": "blocklist", "description": "Чёрный список (админ)"})
         try:
             self._tg("setMyCommands", commands=json.dumps(commands))
             self._tg("setChatMenuButton", menu_button=json.dumps({"type": "commands"}))
@@ -287,9 +293,15 @@ class Registrar(object):
     def _load_state(self):
         try:
             with open(self.state_file, encoding="utf-8") as f:
-                return json.load(f)
+                state = json.load(f)
         except Exception:
-            return {"requests": {}, "history": []}
+            state = {"requests": {}, "history": []}
+        if not isinstance(state, dict):
+            state = {"requests": {}, "history": []}
+        state.setdefault("requests", {})
+        state.setdefault("history", [])
+        state.setdefault("blacklist", [])
+        return state
 
     def _save_state(self):
         try:
@@ -306,12 +318,12 @@ class Registrar(object):
 
     # Telegram API
 
-    def _tg(self, method, **params):
+    def _tg(self, method, _http_timeout=15, **params):
         url = "https://api.telegram.org/bot%s/%s" % (self.token, method)
         data = urllib.parse.urlencode(params).encode()
         req = urllib.request.Request(url, data=data, method="POST")
         try:
-            with _urlopen(req, 70) as r:
+            with _urlopen(req, _http_timeout) as r:
                 return json.loads(r.read().decode())
         except Exception as e:
             body = ""
@@ -349,6 +361,17 @@ class Registrar(object):
         except Exception as e:
             self.log("регистратор: edit err: %s" % str(e)[:200])
             return None
+
+    def _tg_edit_or_send(self, chat_id, message_id, text, reply_markup=None):
+        """Правит сообщение с кнопками, а если Telegram не дал — шлёт новое.
+
+        Через прокси editMessageText иногда отваливается целиком. Тогда админ
+        должен увидеть итог хотя бы новым сообщением, а не молчание."""
+        if chat_id and message_id:
+            res = self._tg_edit(chat_id, message_id, text, reply_markup)
+            if res is not None:
+                return res
+        return self._tg_send(chat_id, text, reply_markup)
 
     def _tg_answer(self, callback_id, text=""):
         try:
@@ -434,7 +457,8 @@ class Registrar(object):
     def _poller_loop(self):
         while not self.stop_evt.is_set():
             try:
-                res = self._tg("getUpdates", timeout=25, offset=self.offset)
+                res = self._tg("getUpdates", timeout=25, offset=self.offset,
+                               _http_timeout=40)
                 for upd in res.get("result", []):
                     uid = upd.get("update_id", 0) + 1
                     if uid > self.offset:
@@ -531,6 +555,27 @@ class Registrar(object):
             else:
                 self._tg_send(chat_id, "Команда /create только для администратора.")
             return
+        if text.startswith("/unblock"):
+            if user_id not in self.admin_ids:
+                self._tg_send(chat_id, "Команда только для администратора.")
+                return
+            parts = text.split(None, 1)
+            arg = parts[1].strip() if len(parts) > 1 else ""
+            if not arg:
+                self._tg_send(chat_id, "Кого разблокировать? Напиши /unblock логин или Telegram ID.")
+                return
+            n = self._bl_remove(arg)
+            if n:
+                self._tg_send(chat_id, "Убрано из чёрного списка: %d. Человек снова может подать заявку." % n)
+            else:
+                self._tg_send(chat_id, "Такого нет в чёрном списке.")
+            return
+        if text in ("/blocklist", "/blacklist"):
+            if user_id not in self.admin_ids:
+                self._tg_send(chat_id, "Команда только для администратора.")
+                return
+            self._tg_send(chat_id, self._bl_report())
+            return
         if text in ("/start", "/register"):
             self._start_register(chat_id, user_id, user)
             return
@@ -548,6 +593,9 @@ class Registrar(object):
     def _start_register(self, chat_id, user_id, user):
         if user_id in self.admin_ids:
             self._tg_send(chat_id, "Ты администратор — тебе не нужно регистрироваться. Заявки приходят сюда.")
+            return
+        if self._bl_find(tg_user_id=user_id):
+            self._tg_send(chat_id, BLOCKED_TEXT)
             return
         if self._pending_for_user(user_id):
             self._tg_send(chat_id, "У тебя уже есть заявка на проверке. Жди решения администратора.")
@@ -590,6 +638,10 @@ class Registrar(object):
             self.conv[user_id] = {"step": "await_type", "username": username, "password": pwd}
             self._tg_send(chat_id, "Создание учётной записи «%s».\nКем будет пользователь?"
                           % username, reply_markup=self._type_kb())
+            return
+        if self._bl_find(tg_user_id=user_id, username=username):
+            del self.conv[user_id]
+            self._tg_send(chat_id, BLOCKED_TEXT)
             return
         del self.conv[user_id]
         req_id = uuid.uuid4().hex[:12]
@@ -653,9 +705,12 @@ class Registrar(object):
         if user_id not in self.admin_ids:
             self._tg_answer(cb.get("id"), "Эта кнопка не для тебя.")
             return
+        # Отвечаем на нажатие сразу: правка сообщения идёт через прокси и
+        # может залипнуть на десятки секунд, а без ответа Telegram гасит
+        # кнопку по таймауту — со стороны это выглядит как «кнопка не работает».
+        self._tg_answer(cb.get("id"))
         data = cb.get("data", "")
         if ":" not in data:
-            self._tg_answer(cb.get("id"))
             return
         action, value = data.split(":", 1)
         chat_id = cb.get("message", {}).get("chat", {}).get("id")
@@ -666,20 +721,19 @@ class Registrar(object):
         req_id = value
         req = self.state["requests"].get(req_id)
         if not req:
-            self._tg_answer(cb.get("id"), "Заявка не найдена.")
+            self._tg_edit_or_send(chat_id, message_id, "Заявка не найдена.")
             return
         if req.get("status") != "pending":
-            self._tg_answer(cb.get("id"), "Заявка уже обработана.")
+            self._tg_edit_or_send(chat_id, message_id, "Заявка уже обработана.")
             return
         if action == "accept":
             self._accept(req_id, req, chat_id, message_id)
         elif action == "reject":
-            self._reject(req_id, req, chat_id, message_id)
+            self._reject(req_id, req, chat_id, message_id, admin_id=user_id)
         elif action == "retry":
             self._accept(req_id, req, chat_id, message_id)
         elif action == "cancel":
             self._cancel(req_id, req, chat_id, message_id)
-        self._tg_answer(cb.get("id"))
 
     def _handle_type_choice(self, callback_id, user_id, value, chat_id, message_id):
         conv = self.conv.pop(user_id, None)
@@ -753,12 +807,22 @@ class Registrar(object):
         self.pending_users[req["username"].lower()] = req_id
         self.create_deadlines[req_id] = time.monotonic() + CREATE_TIMEOUT_SEC
 
-    def _reject(self, req_id, req, chat_id, message_id):
+    def _reject(self, req_id, req, chat_id, message_id, admin_id=None):
         req["status"] = "rejected"
+        self._bl_add(req, admin_id=admin_id)
         self._save_state()
-        self._tg_edit(chat_id, message_id, "Заявка на «%s» отклонена." % req["username"])
+        self._tg_edit_or_send(
+            chat_id, message_id,
+            "Заявка на «%s» отклонена.\n"
+            "Пользователь внесён в чёрный список: повторно подать заявку он не сможет."
+            % req["username"])
         if req.get("tg_user_id"):
-            self._tg_send(req["tg_user_id"], "Заявка на логин «%s» отклонена администратором." % req["username"])
+            self._tg_send(
+                req["tg_user_id"],
+                "Заявка на логин «%s» отклонена администратором сервера.\n"
+                "Твой аккаунт заблокирован в боте: подать новую заявку на "
+                "регистрацию больше не получится." % req["username"])
+        self.log("регистратор: заявка %s отклонена, в чёрный список" % req["username"])
         self._archive(req_id, req, approved=False)
 
     # Завершение
@@ -874,6 +938,74 @@ class Registrar(object):
             if req.get("username", "").lower() == low and req.get("status") == "pending":
                 return True
         return False
+
+    # Чёрный список отклонённых
+
+    def _bl_find(self, tg_user_id=None, username=None):
+        try:
+            tid = int(tg_user_id) if tg_user_id else None
+        except (TypeError, ValueError):
+            tid = None
+        low = (username or "").strip().lower()
+        for entry in self.state.get("blacklist") or []:
+            if tid and entry.get("tg_user_id") == tid:
+                return entry
+            if low and (entry.get("username") or "").lower() == low:
+                return entry
+        return None
+
+    def _bl_add(self, req, admin_id=None):
+        tg_id = req.get("tg_user_id")
+        username = (req.get("username") or "").strip()
+        if not tg_id and not username:
+            return None
+        if self._bl_find(tg_user_id=tg_id, username=username):
+            return None
+        entry = {
+            "tg_user_id": tg_id,
+            "username": username,
+            "tg_name": req.get("tg_name"),
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "by": admin_id,
+        }
+        self.state.setdefault("blacklist", []).append(entry)
+        self.log("регистратор: в чёрный список добавлен %s (tg %s)" % (username or "?", tg_id))
+        return entry
+
+    def _bl_remove(self, value):
+        val = str(value or "").strip()
+        if not val:
+            return 0
+        low = val.lower()
+        try:
+            tid = int(val)
+        except ValueError:
+            tid = None
+        keep, removed = [], 0
+        for entry in self.state.get("blacklist") or []:
+            hit = (entry.get("username") or "").lower() == low
+            if not hit and tid is not None and entry.get("tg_user_id") == tid:
+                hit = True
+            if hit:
+                removed += 1
+            else:
+                keep.append(entry)
+        if removed:
+            self.state["blacklist"] = keep
+            self._save_state()
+        return removed
+
+    def _bl_report(self):
+        items = self.state.get("blacklist") or []
+        if not items:
+            return "Чёрный список пуст."
+        lines = ["Чёрный список: %d" % len(items)]
+        for e in items[-30:]:
+            lines.append("• %s — Telegram %s, %s" % (
+                e.get("username") or "?",
+                e.get("tg_user_id") or "?",
+                (e.get("at") or "")[:10]))
+        return "\n".join(lines)
 
 
 def start(cfg, log_fn=print):
